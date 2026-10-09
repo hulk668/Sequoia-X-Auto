@@ -109,17 +109,22 @@ python main.py
 
 ### 3. 数据持久化说明
 
-数据库 `data/sequoia_v2.db` 有 117MB，超过 GitHub 单文件 100MB 限制且被 `.gitignore` 排除，
-因此**不入库**，改用 `actions/cache` 滚动缓存持久化：
+数据库 `data/sequoia_v2.db` 有 100MB+，超过 GitHub 单文件 100MB 限制且被 `.gitignore` 排除，
+因此**数据库本身不入库**，改用「缓存 + 种子」两级方案：
 
-- 每轮运行前按 `restore-keys: sequoia-db-` 恢复最近一次缓存；
-- 运行后用 `sequoia-db-<run_id>` 保存新副本；
-- ⚠️ **缓存为空时任务会直接失败**：工作流已移除自动回填，缓存未命中时无法增量更新，
-  会以明确错误退出，避免"跑绿了但一只都没选出来"的假成功。
+1. **滚动缓存**：每轮运行前按 `restore-keys: sequoia-db-` 恢复最近一次缓存，
+   运行后用 `sequoia-db-<run_id>` 保存新副本 —— 这是正常路径。
+2. **种子引导**：缓存未命中时（首次运行、或缓存被 GitHub 清理），
+   自动解压仓库内的 `data/seed/sequoia_v2.db.gz` 作为初始数据库。
 
-> 回填接口（baostock 全市场历史 K 线）当前数据仍有问题，因此不放进自动化流程。
+两级都没有数据时任务才会失败并输出明确错误，避免"跑绿了但一只都没选出来"的假成功。
+
+> **回填接口（baostock 全市场历史 K 线）当前数据仍有问题**，因此不放进自动化流程。
 > 需要回填时在本机手动执行 `python main.py --backfill`。
-> 若要让 Actions 上的缓存有初始数据，可后续改为从 Release 附件下载现成数据库。
+> 种子文件的详情、当前覆盖面与重新生成方式见 [`data/seed/README.md`](data/seed/README.md)。
+
+⚠️ 当前种子只覆盖约 1332 只股票（全市场约 5200 只），策略每天只扫描这部分市场。
+补齐历史数据后请重新生成种子。
 
 ### 4. 推送方式
 
@@ -149,7 +154,8 @@ TurtleTradeStrategy（1 只）
 - **60 天不活跃会被禁用**：仓库连续 60 天无提交，GitHub 会自动暂停定时任务，需在 Actions 页面手动重新启用；
   仓库有其它提交活动即可保持激活。
 - **cron 可能延迟**：GitHub 定时任务在高峰期可能延迟数分钟到数十分钟，且不保证 100% 触发。
-- **缓存会被清理**：`actions/cache` 连续 7 天未被访问会被 GitHub 清掉，届时需重新准备初始数据库。
+- **缓存会被清理**：`actions/cache` 连续 7 天未被访问会被 GitHub 清掉，
+  届时工作流会自动从 `data/seed/` 的种子重新引导，无需人工干预。
 
 ---
 
@@ -157,11 +163,12 @@ TurtleTradeStrategy（1 只）
 
 ```
 Sequoia-X/
-├── .github/workflows/daily.yml  # GitHub Actions：定时选股 + 手动回填
+├── .github/workflows/daily.yml  # GitHub Actions：定时选股（缓存+种子两级数据）
 ├── main.py                      # 入口：argparse 分发日常/回填模式
 ├── pyproject.toml               # 依赖声明 + ruff/pytest 配置
 ├── .env.example                 # 环境变量模板
 ├── data/                        # SQLite 数据库（运行时生成，不入 git）
+│   └── seed/sequoia_v2.db.gz    # 数据库种子（Actions 冷启动用，详见同目录 README）
 ├── sequoia_x/
 │   ├── core/
 │   │   ├── config.py            # Pydantic-settings 配置管理

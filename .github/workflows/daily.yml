@@ -58,23 +58,39 @@ jobs:
           restore-keys: |
             sequoia-db-
 
+      # 缓存未命中时（首次运行 / 缓存被 GitHub 清理），从仓库内的 gzip 种子引导出初始数据库。
+      # 种子文件与生成方式见 data/seed/README.md
+      - name: 缓存未命中则从种子引导数据库
+        run: |
+          if [ -f data/sequoia_v2.db ]; then
+            echo "缓存已命中（$(du -h data/sequoia_v2.db | cut -f1)），跳过种子引导"
+            exit 0
+          fi
+          if [ ! -f data/seed/sequoia_v2.db.gz ]; then
+            echo "::error::缓存为空，且种子文件 data/seed/sequoia_v2.db.gz 不存在，无法初始化数据库。"
+            exit 1
+          fi
+          mkdir -p data
+          gunzip -c data/seed/sequoia_v2.db.gz > data/sequoia_v2.db
+          echo "已从种子引导数据库：$(du -h data/sequoia_v2.db | cut -f1)"
+
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install akshare baostock "pydantic-settings>=2.0" python-dotenv rich pandas requests
 
-      # 已移除自动回填：数据库完全依赖缓存。缓存为空时无法做增量更新，
-      # 直接失败并给出明确提示，避免"跑绿了但什么都没选出来"的假成功。
+      # 已移除自动回填（回填接口数据仍有问题）。数据库来源 = 缓存 或 种子引导，
+      # 这里做最后一道兜底校验，避免"跑绿了但什么都没选出来"的假成功。
       - name: 检查数据库
         run: |
           if [ ! -f data/sequoia_v2.db ]; then
-            echo "::error::未找到 data/sequoia_v2.db（缓存为空），无法执行增量选股，请先准备初始数据库。"
+            echo "::error::未找到 data/sequoia_v2.db：缓存恢复与种子引导均未产生数据库。"
             exit 1
           fi
           ROWS=$(python -c "import sqlite3;print(sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0])" 2>/dev/null || echo 0)
           echo "数据库现有 $ROWS 行"
           if [ "$ROWS" = "0" ]; then
-            echo "::error::数据库为空，无法执行增量选股，请先准备初始数据库。"
+            echo "::error::数据库为空，无法执行增量选股。请检查 data/seed/sequoia_v2.db.gz。"
             exit 1
           fi
 
