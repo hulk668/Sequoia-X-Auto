@@ -51,30 +51,49 @@ class PushPlusNotifier:
         return f"SZ{code}"
 
     @staticmethod
-    def _get_stock_names(symbols: list[str]) -> dict[str, str]:
-        """通过 baostock 批量查询股票名称，返回 {code: name} 映射。
+    def _load_stock_names() -> dict[str, str]:
+        """兜底：一次性拉取全市场股票名称，返回 {code: name} 映射。
 
-        整轮只登录一次 baostock，避免逐策略重复握手。
+        正常情况下名称由 DataEngine 从本地 stock_name 表提供（main.py 传入），
+        这里只在没拿到本地名称时兜底，且**只发一次请求**。
 
-        Args:
-            symbols: 股票代码列表（纯数字）。
+        注意不要退化成逐只 query_stock_basic：请求量大时 baostock 会开始返回空结果，
+        导致大部分股票只能显示代码。
 
         Returns:
-            {代码: 股票名称} 映射；查询失败的代码不会出现在结果中。
+            {代码: 股票名称}；失败时返回空 dict。
         """
         import baostock as bs
 
-        bs.login()
+        try:
+            lg = bs.login()
+        except Exception as exc:
+            logger.warning(f"baostock 登录异常，无法获取股票名称：{exc}")
+            return {}
+
+        if lg.error_code != "0":
+            logger.warning(f"baostock 登录失败，无法获取股票名称：{lg.error_msg}")
+            return {}
+
         mapping: dict[str, str] = {}
         try:
-            for code in symbols:
-                prefix = "sh" if code.startswith(("6", "9")) else "sz"
-                rs = bs.query_stock_basic(code=f"{prefix}.{code}")
-                while rs.next():
-                    row = rs.get_row_data()
-                    mapping[code] = row[1]  # 第2个字段是股票名称
+            rs = bs.query_stock_basic(code_name="", code="")
+            while rs.next():
+                r = rs.get_row_data()
+                # 字段顺序：code, code_name, ipoDate, outDate, type, status
+                # type != 1 的是指数等；sh.000001(上证综合指数) 与 sz.000001(平安银行)
+                # 数字部分相同，必须过滤掉指数，否则会串名。
+                if len(r) < 6 or r[4] != "1":
+                    continue
+                symbol = r[0].split(".")[-1]
+                name = (r[1] or "").strip()
+                if symbol and name:
+                    mapping[symbol] = name
+        except Exception as exc:
+            logger.warning(f"获取股票名称异常：{exc}")
         finally:
             bs.logout()
+
         return mapping
 
     def _resolve_token(self, webhook_key: str) -> str:
@@ -149,12 +168,18 @@ class PushPlusNotifier:
         except requests.RequestException as exc:
             logger.error(f"PushPlus 推送请求异常 [{tag}]：{exc}")
 
-    def send_digest(self, results: Mapping[str, tuple[list[str], str]]) -> None:
+    def send_digest(
+        self,
+        results: Mapping[str, tuple[list[str], str]],
+        names: Mapping[str, str] | None = None,
+    ) -> None:
         """汇总所有策略的选股结果后统一推送。
 
         Args:
             results: {策略名: (选股代码列表, webhook_key)}。
                      无选股结果的策略会被自动过滤，不参与推送。
+            names: {代码: 股票名称}，通常由 DataEngine 从本地 stock_name 表提供。
+                   传 None 时退化为自行向 baostock 拉一次全市场名称。
 
         Raises:
             不抛出异常；HTTP 失败时记录 ERROR 日志。
@@ -166,13 +191,22 @@ class PushPlusNotifier:
             logger.info("所有策略均无选股结果，跳过推送")
             return
 
-        # 汇总全部代码，只查一次股票名称
+        # 汇总全部代码（去重，保持策略顺序）
         all_symbols: list[str] = []
         for _, symbols, _ in active:
             for code in symbols:
                 if code not in all_symbols:
                     all_symbols.append(code)
-        names = self._get_stock_names(all_symbols)
+
+        if names is None:
+            names = self._load_stock_names()
+
+        missing = [c for c in all_symbols if c not in names]
+        if missing:
+            logger.warning(
+                f"{len(missing)}/{len(all_symbols)} 只股票未匹配到名称，将显示代码"
+                f"（示例：{', '.join(missing[:5])}）"
+            )
 
         # 按 token 分组：同一推送目标的策略合并为一条消息
         groups: dict[str, list[tuple[str, list[str]]]] = {}

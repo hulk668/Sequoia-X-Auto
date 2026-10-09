@@ -62,6 +62,13 @@ def main() -> None:
         count = engine.sync_today_bulk()
         logger.info(f"快照同步完成，写入 {count} 只股票")
 
+        # 刷新股票名称（best-effort）：名称存本地 stock_name 表，
+        # 失败只告警、不影响流程，推送会沿用上一次刷新的名称。
+        try:
+            engine.refresh_stock_names()
+        except Exception as exc:
+            logger.warning(f"股票名称刷新失败，沿用已有名称：{exc}")
+
         # 4. 策略列表（新增策略在此追加即可）
         strategies: list[BaseStrategy] = [
             MaVolumeStrategy(engine=engine, settings=settings),
@@ -86,7 +93,8 @@ def main() -> None:
             results[strategy_name] = (selected, strategy.webhook_key)
 
         # 6. 汇总推送：同一推送目标上的多个策略合并为一条消息
-        notifier.send_digest(results)
+        #    名称取自本地 stock_name 表，避免每次推送都依赖 baostock 查询
+        notifier.send_digest(results, engine.get_stock_names())
 
     except Exception:
         try:

@@ -30,6 +30,13 @@ _CREATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_symbol_date ON stock_daily (symbol, date);
 """
 
+_CREATE_NAME_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS stock_name (
+    symbol TEXT PRIMARY KEY,
+    name   TEXT NOT NULL
+);
+"""
+
 
 def _bs_fetch_batch(tasks: list) -> list:
     """多进程 worker：独立 login，批量拉取 baostock 数据。"""
@@ -66,6 +73,7 @@ class DataEngine:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(_CREATE_TABLE_SQL)
             conn.execute(_CREATE_INDEX_SQL)
+            conn.execute(_CREATE_NAME_TABLE_SQL)
             conn.commit()
         logger.info(f"数据库初始化完成：{self.db_path}")
 
@@ -362,3 +370,72 @@ class DataEngine:
                 "SELECT DISTINCT symbol FROM stock_daily"
             ).fetchall()
         return [row[0] for row in rows]
+
+    # ── 股票名称 ──
+
+    def refresh_stock_names(self) -> int:
+        """批量刷新全市场股票名称到本地 stock_name 表，返回写入条数。
+
+        为什么不逐只查询：baostock 单次会话内逐只 query_stock_basic 在请求量大时
+        会开始返回空结果（CI 环境尤其明显），导致大量股票只能显示代码。
+        这里改成一次性拉全市场（单次请求），并且落库以便跟随数据库缓存持久化 ——
+        即使某次刷新失败，也能沿用上一次的名称，不影响推送显示。
+
+        仅采集 type == "1"（股票），避免把指数写进来：
+        `sh.000001` 是上证综合指数，与 `sz.000001` 平安银行数字部分相同，
+        不过滤会导致同号串名。
+
+        Returns:
+            成功写入的名称条数；失败或未取到数据时返回 0（沿用已有数据）。
+        """
+        import baostock as bs
+
+        try:
+            lg = bs.login()
+        except Exception as exc:  # 网络异常
+            logger.warning(f"baostock 登录异常，沿用已有股票名称：{exc}")
+            return 0
+
+        if lg.error_code != "0":
+            logger.warning(f"baostock 登录失败，沿用已有股票名称：{lg.error_msg}")
+            return 0
+
+        rows: list[tuple[str, str]] = []
+        try:
+            rs = bs.query_stock_basic(code_name="", code="")
+            while rs.next():
+                r = rs.get_row_data()
+                # 字段顺序：code, code_name, ipoDate, outDate, type, status
+                if len(r) < 6 or r[4] != "1":  # type != 1 的是指数等，跳过
+                    continue
+                symbol = r[0].split(".")[-1]
+                name = (r[1] or "").strip()
+                if symbol and name:
+                    rows.append((symbol, name))
+        except Exception as exc:
+            logger.warning(f"获取股票名称异常，沿用已有股票名称：{exc}")
+            return 0
+        finally:
+            bs.logout()
+
+        if not rows:
+            logger.warning("未获取到股票名称，沿用已有数据")
+            return 0
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                "INSERT INTO stock_name (symbol, name) VALUES (?, ?) "
+                "ON CONFLICT(symbol) DO UPDATE SET name = excluded.name",
+                rows,
+            )
+            conn.commit()
+
+        logger.info(f"股票名称已刷新 {len(rows)} 条")
+        return len(rows)
+
+    def get_stock_names(self) -> dict[str, str]:
+        """读取本地股票名称表，返回 {代码: 名称}。"""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute("SELECT symbol, name FROM stock_name").fetchall()
+        return {symbol: name for symbol, name in rows}
+
