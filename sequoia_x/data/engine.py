@@ -60,6 +60,66 @@ def _bs_fetch_batch(tasks: list) -> list:
     return results
 
 
+def _probe_baostock() -> tuple[bool, str]:
+    """探测 baostock 行情接口是否真的可用（拿一只样本股做最小查询）。
+
+    为什么需要探测：baostock 内部用裸 print() 直接往 stdout 吐错误
+    （见 baostock/util/socketutil.py 的"服务器连接失败/接收数据异常"），
+    不走 logging，没法用日志级别屏蔽。一旦接口在 CI 环境不可达，
+    8 个 worker 会刷出上百行噪音，还白等一两分钟。
+
+    这里先在主进程用一次最小查询探路，不可用就直接跳过同步 ——
+    既不刷屏，也省掉拉起进程池的开销。
+
+    Returns:
+        (是否可用, 失败原因)。可用时原因为空字符串。
+    """
+    import contextlib
+    import io
+    from datetime import date, timedelta
+
+    import baostock as bs
+
+    end = date.today().strftime("%Y-%m-%d")
+    start = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+
+    buf = io.StringIO()
+    reason = ""
+    try:
+        # 把 baostock 的 stdout 收进来，稍后压成一行诊断信息
+        with contextlib.redirect_stdout(buf):
+            lg = bs.login()
+            if lg.error_code != "0":
+                reason = f"登录失败：{lg.error_msg}"
+            else:
+                try:
+                    rs = bs.query_history_k_data_plus(
+                        "sh.600000",
+                        "date,close",
+                        start_date=start,
+                        end_date=end,
+                        frequency="d",
+                        adjustflag="1",
+                    )
+                    if rs.error_code != "0":
+                        reason = f"查询返回错误：{rs.error_msg}"
+                    else:
+                        rs.next()  # 必须真正取一次，才会触发实际的数据传输
+                finally:
+                    bs.logout()
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+
+    if not reason:
+        return True, ""
+
+    noise = [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
+    detail = next((ln for ln in noise if "success" not in ln.lower()), "")
+    if detail:
+        reason = f"{reason}｜baostock 输出：{detail}"
+    return False, reason
+
+
 class DataEngine:
     """行情数据引擎，负责 SQLite 存储和 baostock 数据同步。"""
 
@@ -83,6 +143,12 @@ class DataEngine:
                 "SELECT MAX(date) FROM stock_daily WHERE symbol = ?",
                 (symbol,),
             ).fetchone()
+        return row[0] if row and row[0] else None
+
+    def get_latest_date(self) -> str | None:
+        """返回 stock_daily 中最新的一天，即当前数据的截止日期。"""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()
         return row[0] if row and row[0] else None
 
     def get_ohlcv(self, symbol: str) -> pd.DataFrame:
@@ -132,6 +198,16 @@ class DataEngine:
             return 0
 
         logger.info(f"需要更新 {len(tasks)} 只股票，启动多进程并行拉取...")
+
+        # 先探路：接口不可达就直接跳过，不拉起进程池刷屏
+        reachable, reason = _probe_baostock()
+        if not reachable:
+            logger.warning(
+                f"baostock 数据接口不可用（{reason}），跳过本次增量同步。"
+                f"数据库数据截止 {self.get_latest_date()}，"
+                f"本次选股将基于该日期及之前的数据。"
+            )
+            return 0
 
         n_workers = min(8, len(tasks))
         chunks = [tasks[i::n_workers] for i in range(n_workers)]

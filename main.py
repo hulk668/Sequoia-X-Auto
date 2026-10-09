@@ -58,16 +58,23 @@ def main() -> None:
             return
 
         # ── 日常模式：单次 API 补今天 + 策略 + 推送 ──
-        logger.info("开始拉取最新快照...")
-        count = engine.sync_today_bulk()
-        logger.info(f"快照同步完成，写入 {count} 只股票")
+        if settings.skip_sync:
+            logger.warning("SKIP_SYNC 已开启，跳过所有 baostock 交互（增量同步 + 名称刷新）")
+        else:
+            logger.info("开始拉取最新快照...")
+            count = engine.sync_today_bulk()
+            logger.info(f"快照同步完成，写入 {count} 只股票")
 
-        # 刷新股票名称（best-effort）：名称存本地 stock_name 表，
-        # 失败只告警、不影响流程，推送会沿用上一次刷新的名称。
-        try:
-            engine.refresh_stock_names()
-        except Exception as exc:
-            logger.warning(f"股票名称刷新失败，沿用已有名称：{exc}")
+            # 刷新股票名称（best-effort）：名称存本地 stock_name 表，
+            # 失败只告警、不影响流程，推送会沿用上一次刷新的名称。
+            try:
+                engine.refresh_stock_names()
+            except Exception as exc:
+                logger.warning(f"股票名称刷新失败，沿用已有名称：{exc}")
+
+        # 数据截止日期：同步失败或跳过时会早于今天，选股结果基于该日期及之前的数据
+        data_date = engine.get_latest_date()
+        logger.info(f"数据库数据截止日期：{data_date}")
 
         # 4. 策略列表（新增策略在此追加即可）
         strategies: list[BaseStrategy] = [
@@ -94,7 +101,7 @@ def main() -> None:
 
         # 6. 汇总推送：同一推送目标上的多个策略合并为一条消息
         #    名称取自本地 stock_name 表，避免每次推送都依赖 baostock 查询
-        notifier.send_digest(results, engine.get_stock_names())
+        notifier.send_digest(results, engine.get_stock_names(), data_date=data_date)
 
     except Exception:
         try:

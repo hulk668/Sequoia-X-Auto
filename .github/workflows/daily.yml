@@ -2,11 +2,16 @@ name: Sequoia-X 每日选股
 
 # ── 触发方式 ──────────────────────────────────────────────
 # 1) 定时：每周一至周五 11:15 UTC（= 北京时间 19:15，收盘后）
-# 2) 手动：Actions 页面点 "Run workflow" 立即执行一次
+# 2) 手动：Actions 页面点 "Run workflow"，可选是否跳过增量同步
 on:
   schedule:
     - cron: '15 11 * * 1-5'
   workflow_dispatch:
+    inputs:
+      skip_sync:
+        description: '跳过 baostock 增量同步（接口不可达时用，只跑策略）'
+        type: boolean
+        default: false
 
 # 同一时间只跑一个实例，避免两次触发并发写坏数据库
 concurrency:
@@ -36,6 +41,9 @@ jobs:
       STRATEGY_WEBHOOK_LIMIT_DOWN: ${{ secrets.STRATEGY_WEBHOOK_LIMIT_DOWN }}
       STRATEGY_WEBHOOK_RPS: ${{ secrets.STRATEGY_WEBHOOK_RPS }}
       STRATEGY_WEBHOOK_PRIVATE_PLACEMENT: ${{ secrets.STRATEGY_WEBHOOK_PRIVATE_PLACEMENT }}
+      # 手动触发时可勾选跳过增量同步；定时触发下该 input 为空字符串，
+      # 配置层会把空串按 False 处理（见 Settings._blank_bool_is_false）
+      SKIP_SYNC: ${{ github.event.inputs.skip_sync }}
 
     steps:
       - name: 检出代码

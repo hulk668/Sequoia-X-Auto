@@ -108,12 +108,14 @@ class PushPlusNotifier:
         self,
         items: Sequence[tuple[str, list[str]]],
         names: dict[str, str],
+        data_date: str | None = None,
     ) -> str:
         """生成汇总消息正文（Markdown），每个策略渲染为一段。
 
         Args:
             items: [(策略名, 选股代码列表), ...]，均为有结果的策略。
             names: {代码: 股票名称} 映射。
+            data_date: 数据库数据的截止日期（YYYY-MM-DD）。
 
         Returns:
             Markdown 格式的消息正文。
@@ -130,11 +132,18 @@ class PushPlusNotifier:
                 links.append(f"[{name}](https://xueqiu.com/S/{xq_code})")
             blocks.append(f"**{strategy_name}**（{len(symbols)} 只）\n" + " ".join(links))
 
+        # 数据没更新到当天时明确标出，避免把旧数据的结果误当成当天选股
+        date_line = f"**日期：** {today}"
+        if data_date and data_date != today:
+            date_line += f"（⚠️ 数据截止 {data_date}）"
+        date_line += "\n"
+
         return (
-            f"**日期：** {today}\n"
-            f"**策略数：** {len(items)}\n"
-            f"**选股合计：** {total} 只\n"
-            f"---\n\n" + "\n\n".join(blocks)
+            date_line
+            + f"**策略数：** {len(items)}\n"
+            + f"**选股合计：** {total} 只\n"
+            + "---\n\n"
+            + "\n\n".join(blocks)
         )
 
     # ── 发送 ──
@@ -172,6 +181,7 @@ class PushPlusNotifier:
         self,
         results: Mapping[str, tuple[list[str], str]],
         names: Mapping[str, str] | None = None,
+        data_date: str | None = None,
     ) -> None:
         """汇总所有策略的选股结果后统一推送。
 
@@ -180,6 +190,8 @@ class PushPlusNotifier:
                      无选股结果的策略会被自动过滤，不参与推送。
             names: {代码: 股票名称}，通常由 DataEngine 从本地 stock_name 表提供。
                    传 None 时退化为自行向 baostock 拉一次全市场名称。
+            data_date: 数据库数据的截止日期（YYYY-MM-DD），
+                       与运行日期不一致时会在消息里标出 ⚠️ 提醒。
 
         Raises:
             不抛出异常；HTTP 失败时记录 ERROR 日志。
@@ -218,7 +230,7 @@ class PushPlusNotifier:
         )
 
         for token, items in groups.items():
-            content = self._build_digest_content(items, names)
+            content = self._build_digest_content(items, names, data_date)
             strategy_names = " + ".join(name for name, _ in items)
             title = f"📈 Sequoia-X 选股播报 | 共 {len(items)} 个策略"
             self._post(token, title, content, strategy_names)

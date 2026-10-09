@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     start_date: str = "2024-01-01"
     pushplus_token: str  # 必填字段，缺失或为空时抛出 ValidationError
     strategy_webhooks: dict[str, str] = {}
+    # 仅做策略选股、跳过 baostock 增量同步（用于接口不可达时快速跑完）
+    skip_sync: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -16,6 +18,19 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",  # <--- 加上这一行！让 Pydantic 放行未定义的变量
     )
+
+    @field_validator("skip_sync", mode="before")
+    @classmethod
+    def _blank_bool_is_false(cls, v: object) -> object:
+        """把空字符串按 False 处理。
+
+        GitHub Actions 里用 workflow_dispatch 的 input 注入环境变量时，
+        定时触发（schedule）下该 input 取到的是空字符串。pydantic 解析 bool
+        遇到 "" 会直接抛 ValidationError，导致定时任务全部失败 —— 这里兜住。
+        """
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return False
+        return v
 
     @field_validator("pushplus_token")
     @classmethod
