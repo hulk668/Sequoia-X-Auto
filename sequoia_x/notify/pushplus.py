@@ -21,6 +21,40 @@ logger = get_logger(__name__)
 # PushPlus 发送接口
 PUSHPLUS_API_URL = "https://www.pushplus.plus/send"
 
+# 策略展示信息：类名 → (中文名, 买点)。
+# 买点文案严格对应各策略源码里的入选条件，收到推送时无需回看代码即可看懂信号含义。
+# 新增策略时在此登记；未登记的类名会原样显示类名、不带买点。
+STRATEGY_DISPLAY: dict[str, tuple[str, str]] = {
+    "MaVolumeStrategy": (
+        "均线金叉+放量突破",
+        "5日线上穿20日线，且成交量放大到20日均量的1.5倍",
+    ),
+    "TurtleTradeStrategy": (
+        "海龟突破新高",
+        "突破近20日最高价，成交额超1亿、收阳且真涨",
+    ),
+    "HighTightFlagStrategy": (
+        "高位旗形缩量",
+        "40日大涨后近10日缩量窄幅横盘，且不跌破高位",
+    ),
+    "LimitUpShakeoutStrategy": (
+        "涨停次日洗盘",
+        "昨日涨停、今日放量收阴但不破昨收，洗盘不破位",
+    ),
+    "UptrendLimitDownStrategy": (
+        "上升趋势跌停错杀",
+        "20日线上穿60日线走多头，今日放量跌停，博错杀反抽",
+    ),
+    "RpsBreakoutStrategy": (
+        "RPS极强动量",
+        "120日涨幅排全市场前10%，且股价接近120日新高",
+    ),
+    "PrivatePlacementStrategy": (
+        "定增公告监控",
+        "近7日发布定向增发公告",
+    ),
+}
+
 
 class PushPlusNotifier:
     """PushPlus 推送器。
@@ -102,6 +136,25 @@ class PushPlusNotifier:
             webhook_key.lower(), self.settings.pushplus_token
         )
 
+    @staticmethod
+    def _strategy_headline(strategy_name: str, count: int) -> str:
+        """渲染策略标题行：中文名（N 只）｜买点：一句话。
+
+        未在 STRATEGY_DISPLAY 登记的类名原样显示，保证新增策略也不会丢内容。
+
+        Args:
+            strategy_name: 策略类名（如 MaVolumeStrategy）。
+            count: 该策略选出的股票数量。
+
+        Returns:
+            Markdown 标题行。
+        """
+        display = STRATEGY_DISPLAY.get(strategy_name)
+        if not display:
+            return f"**{strategy_name}**（{count} 只）"
+        cn_name, signal = display
+        return f"**{cn_name}**（{count} 只）｜买点：{signal}"
+
     # ── 消息构建 ──
 
     def _build_digest_content(
@@ -130,7 +183,11 @@ class PushPlusNotifier:
                 xq_code = self._to_xueqiu_code(code)
                 name = names.get(code, xq_code)
                 links.append(f"[{name}](https://xueqiu.com/S/{xq_code})")
-            blocks.append(f"**{strategy_name}**（{len(symbols)} 只）\n" + " ".join(links))
+            blocks.append(
+                self._strategy_headline(strategy_name, len(symbols))
+                + "\n"
+                + " ".join(links)
+            )
 
         # 数据没更新到当天时明确标出，避免把旧数据的结果误当成当天选股
         date_line = f"**日期：** {today}"
