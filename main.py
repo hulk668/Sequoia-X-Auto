@@ -75,22 +75,18 @@ def main() -> None:
 
         notifier = PushPlusNotifier(settings)
 
-        # 5. 遍历策略，有结果则推送至对应机器人
+        # 5. 先把所有策略跑完并汇总，最后统一推送（不逐个策略单独发消息）
+        results: dict[str, tuple[list[str], str]] = {}
         for strategy in strategies:
             strategy_name = type(strategy).__name__
             logger.info(f"执行策略：{strategy_name}")
 
             selected: list[str] = strategy.run()
             logger.info(f"{strategy_name} 选出 {len(selected)} 只股票")
+            results[strategy_name] = (selected, strategy.webhook_key)
 
-            if selected:
-                notifier.send(
-                    symbols=selected,
-                    strategy_name=strategy_name,
-                    webhook_key=strategy.webhook_key,
-                )
-            else:
-                logger.info(f"{strategy_name} 无选股结果，跳过推送")
+        # 6. 汇总推送：同一推送目标上的多个策略合并为一条消息
+        notifier.send_digest(results)
 
     except Exception:
         try:

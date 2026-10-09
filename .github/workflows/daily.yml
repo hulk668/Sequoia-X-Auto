@@ -2,22 +2,13 @@ name: Sequoia-X 每日选股
 
 # ── 触发方式 ──────────────────────────────────────────────
 # 1) 定时：每周一至周五 11:15 UTC（= 北京时间 19:15，收盘后）
-# 2) 手动：Actions 页面点 "Run workflow"，可选 daily / backfill
+# 2) 手动：Actions 页面点 "Run workflow" 立即执行一次
 on:
   schedule:
     - cron: '15 11 * * 1-5'
   workflow_dispatch:
-    inputs:
-      mode:
-        description: '运行模式'
-        required: true
-        default: 'daily'
-        type: choice
-        options:
-          - daily      # 增量更新 + 跑策略 + 推送
-          - backfill   # 全市场历史 K 线回填（首次或补数据用）
 
-# 同一时间只跑一个实例，避免定时与手动触发并发写坏数据库
+# 同一时间只跑一个实例，避免两次触发并发写坏数据库
 concurrency:
   group: sequoia-x
   cancel-in-progress: false
@@ -28,7 +19,7 @@ permissions:
 jobs:
   select:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 90
 
     env:
       PYTHONUNBUFFERED: '1'
@@ -72,28 +63,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install akshare baostock "pydantic-settings>=2.0" python-dotenv rich pandas requests
 
-      # 缓存未命中（首次运行 / 缓存被清理）时返回 need_backfill=1
-      - name: 检查数据库状态
-        id: db
+      # 已移除自动回填：数据库完全依赖缓存。缓存为空时无法做增量更新，
+      # 直接失败并给出明确提示，避免"跑绿了但什么都没选出来"的假成功。
+      - name: 检查数据库
         run: |
-          if [ -f data/sequoia_v2.db ]; then
-            ROWS=$(python -c "import sqlite3;print(sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0])" 2>/dev/null || echo 0)
-          else
-            ROWS=0
+          if [ ! -f data/sequoia_v2.db ]; then
+            echo "::error::未找到 data/sequoia_v2.db（缓存为空），无法执行增量选股，请先准备初始数据库。"
+            exit 1
           fi
-          case "$ROWS" in
-            ''|*[!0-9]*) NEED=1 ;;
-            *) [ "$ROWS" -eq 0 ] && NEED=1 || NEED=0 ;;
-          esac
-          echo "数据库现有 $ROWS 行，need_backfill=$NEED"
-          echo "need_backfill=$NEED" >> "$GITHUB_OUTPUT"
-
-      - name: 回填历史数据
-        if: steps.db.outputs.need_backfill == '1' || github.event.inputs.mode == 'backfill'
-        run: python main.py --backfill
+          ROWS=$(python -c "import sqlite3;print(sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0])" 2>/dev/null || echo 0)
+          echo "数据库现有 $ROWS 行"
+          if [ "$ROWS" = "0" ]; then
+            echo "::error::数据库为空，无法执行增量选股，请先准备初始数据库。"
+            exit 1
+          fi
 
       - name: 日常选股并推送
-        if: github.event.inputs.mode != 'backfill'
         run: python main.py
 
       - name: 失败时上传日志

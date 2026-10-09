@@ -36,3 +36,6 @@ build/
 
 # Hypothesis 测试缓存
 .hypothesis/
+
+# AI 助手工作区数据（本地记忆，勿提交到公开仓库）
+.workbuddy/
