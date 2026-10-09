@@ -59,7 +59,10 @@ def main() -> None:
 
         # ── 日常模式：单次 API 补今天 + 策略 + 推送 ──
         if settings.skip_sync:
-            logger.warning("SKIP_SYNC 已开启，跳过所有 baostock 交互（增量同步 + 名称刷新）")
+            logger.warning(
+                "SKIP_SYNC 已开启，跳过所有数据抓取"
+                "（baostock 增量同步 + akshare 兜底 + 名称刷新），直接基于库中现有数据选股"
+            )
         else:
             logger.info("开始拉取最新快照...")
             count = engine.sync_today_bulk()

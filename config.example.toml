@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────
+# Sequoia-X 本地配置文件模板
+#
+# 用法：
+#   cp config.example.toml config.local.toml
+#   然后编辑 config.local.toml，填入你自己的 token。
+#
+# config.local.toml 已加入 .gitignore，**不会被提交到仓库**，
+# 所以可以放心写真实 token。
+#
+# 程序只读取 config.local.toml，不会读本文件。
+# ⚠️ 切勿把真实 token 写进本文件（它会被提交、公开可见）。
+#
+# 优先级：环境变量 > config.local.toml > .env > 默认值
+# ─────────────────────────────────────────────────────────────
+
+# 数据库路径（默认：data/sequoia_v2.db）
+db_path = "data/sequoia_v2.db"
+
+# 历史数据起始日期（默认：2024-01-01）
+start_date = "2024-01-01"
+
+# PushPlus Token（必填）
+# 获取地址：https://www.pushplus.plus/push1.html
+pushplus_token = "your-pushplus-token-here"
+
+# 是否只跑策略、跳过所有数据抓取（默认 false）
+# 接口不通时设成 true，可跳过同步直接用库里现有数据出选股结果
+skip_sync = false
+
+# baostock 不可用时是否改用 akshare 兜底拉取增量数据（默认 true）
+enable_akshare_fallback = true
+
+# 策略专属推送 Token（可选）。未配置的策略自动使用上面的全局 pushplus_token。
+# 策略标识见 sequoia_x/strategy/ 下各策略的 webhook_key。
+# [strategy_webhooks]
+# ma_volume = "your-ma-volume-token"
+# turtle = "your-turtle-token"
+# flag = "your-flag-token"
+# shakeout = "your-shakeout-token"
+# limit_down = "your-limit-down-token"
+# rps = "your-rps-token"
+# private_placement = "your-private-placement-token"

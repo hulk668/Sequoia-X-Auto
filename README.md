@@ -7,10 +7,10 @@
 ## 简介 | Introduction
 
 Sequoia-X V2 是面向 A 股市场的量化选股系统，基于现代 Python 工程化标准从零重构。
-系统以 OOP 架构、向量化计算和增量数据更新为核心设计原则，每日收盘后自动选股并推送至飞书群。
+系统以 OOP 架构、向量化计算和增量数据更新为核心设计原则，每日收盘后自动选股并推送至 PushPlus。
 
-数据层使用 [baostock](http://baostock.com)（免费、无需注册、无限流）拉取历史及增量日 K 数据（后复权），
-存储于本地 SQLite，彻底规避东方财富反爬问题。
+数据层以 [baostock](http://baostock.com)（免费、无需注册）为主源拉取历史及增量日 K 数据（后复权），
+存储于本地 SQLite；该接口不可用时自动降级到 akshare（东方财富源）兜底。
 
 ---
 
@@ -20,6 +20,8 @@ Sequoia-X V2 是面向 A 股市场的量化选股系统，基于现代 Python �
 python main.py               # 日常模式：增量补数据 + 跑完所有策略 + 汇总后一次性 PushPlus 推送
 python main.py --backfill     # 回填模式：全市场历史K线一次性灌入（约12分钟，接口不稳定时慎用）
 ```
+
+本地从零跑起来看 **[RUNNING.md](RUNNING.md)**。
 
 ---
 
@@ -33,39 +35,44 @@ python main.py --backfill     # 回填模式：全市场历史K线一次性灌�
 | **LimitUpShakeout** | 涨停洗盘回踩确认 |
 | **UptrendLimitDown** | 上升趋势中的跌停反包 |
 | **RpsBreakout** | 欧奈尔 RPS 相对强度突破 |
+| **PrivatePlacement** | 定增公告监控：近 7 日发布定向增发公告 |
 
 ---
 
 ## 快速开始 | Quick Start
 
+> 📖 完整的本地运行说明（数据库准备、配置项、常见问题）见 **[RUNNING.md](RUNNING.md)**。
+
 ### 环境要求
 
-- Python >= 3.10
+- Python >= 3.10（推荐 3.11+）
 
 ### 1. 安装依赖
 
 ```bash
-# 推荐使用 uv（快速包管理器）
-uv sync
-
-# 或者 pip
-pip install .
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install akshare baostock "pydantic-settings>=2.0" python-dotenv rich pandas requests
 ```
 
-### 2. 配置环境变量
+### 2. 配置
 
 ```bash
-cp .env.example .env
-# 编辑 .env，填写飞书 Webhook URL
+cp config.example.toml config.local.toml
+# 编辑 config.local.toml，填入 pushplus_token
 ```
 
-### 3. 首次回填历史数据
+`config.local.toml` 已加入 `.gitignore`，不会被提交。也支持传统的 `.env`（见 `.env.example`）。
+优先级：**环境变量 > `config.local.toml` > `.env` > 默认值**。
+
+### 3. 准备数据库
+
+新克隆的仓库里没有 `data/sequoia_v2.db`（被 `.gitignore` 排除），从种子解压即可：
 
 ```bash
-python main.py --backfill
+gunzip -c data/seed/sequoia_v2.db.gz > data/sequoia_v2.db
 ```
 
-约 12 分钟完成 ~5200 只 A 股历史后复权日 K 数据回填。
+（也可用 `python main.py --backfill` 全量回填，但较慢且回填接口本身不稳定。）
 
 ### 4. 日常运行
 
@@ -103,16 +110,19 @@ python main.py
 未配置的策略会自动回落到全局 `PUSHPLUS_TOKEN`（空值会被忽略，不会覆盖默认 token）。
 
 > **⚠️ Token 从哪来？**
-> 只能来自 GitHub Secrets —— 工作流是通过 `PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}`
-> 把它注入成环境变量的。
+> 在 Actions 上只能来自 GitHub Secrets —— 工作流是通过
+> `PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}` 把它注入成环境变量的。
 >
-> `.env` 和 `.env.example` 在 Actions 上都**不可用**：
-> - `.env` 被 `.gitignore` 排除，checkout 时根本不存在；
-> - `.env.example` 只是给人 `cp .env.example .env` 用的**模板**，
->   程序里 `load_dotenv()` 默认只读 `.env`，永远不会读 `.env.example`。
+> `.env` / `config.local.toml` / `.env.example` 在 Actions 上都**不可用**：
+> - `.env` 与 `config.local.toml` 被 `.gitignore` 排除，checkout 时根本不存在；
+> - `.env.example` / `config.example.toml` 只是给人复制用的**模板**，
+>   程序永远不会读它们。
 >
-> **千万不要把真实 token 写进 `.env.example`** —— 它会被提交进仓库、公开可见。
-> 如果曾经写过，请立刻去 PushPlus 后台重置 token 并更新 Secret，光删文件没用（git 历史里还在）。
+> **千万不要把真实 token 写进模板文件** —— 它会被提交进仓库、公开可见。
+> 如果曾经写过，请立刻去 PushPlus 后台重置 token 并更新 Secret，
+> 光删文件没用（git 历史里还在）。
+>
+> 本地运行怎么配 token，见 **[RUNNING.md](RUNNING.md)**。
 
 工作流第一步就会校验 `PUSHPLUS_TOKEN` 是否为空，没配会立刻报错退出，
 不会白跑几分钟才在推送阶段失败。
@@ -155,12 +165,37 @@ python main.py
 **同步前会先做一次最小查询探测**（`_probe_baostock()`）：
 
 - 可达 → 正常拉起 8 进程并行同步；
-- 不可达 → **直接跳过本次同步**，只留一条 WARNING，不会刷出上百行错误、也不白等一两分钟：
+- 不可达 → **自动改用 akshare 兜底**（见下）；
+- 显式关闭兜底（`enable_akshare_fallback = false`）时 → 跳过本次同步，只留一条 WARNING：
 
   ```
   WARNING  baostock 数据接口不可用（登录失败：网络接收错误。｜baostock 输出：服务器连接失败，请稍后再试。）
            ，跳过本次增量同步。数据库数据截止 2026-10-08，本次选股将基于该日期及之前的数据。
   ```
+
+#### akshare 兜底（`sync_via_akshare`）
+
+baostock 不可用时，自动改用 akshare（东方财富源）拉增量数据。
+
+⚠️ **不能直接写入**：不同数据源的**复权基准不同**。实测同一只票同一日（sh600000 / 2026-10-09）：
+
+| 数据源 | 复权方式 | 收盘价 |
+|---|---|---|
+| baostock | 后复权 | 127.52 |
+| 东方财富 | 后复权 | 102.23 |
+
+而且两者的日收益率也不一致 —— 直接拼接会让价格序列出现断层，均线、RPS 排名全部失真。
+
+所以兜底只借用 akshare **前复权序列的相对涨跌**，用库中已有的后复权收盘做锚点换算：
+
+```
+k = 库中最后一日后复权收盘 ÷ 该日的前复权收盘
+今日后复权价 = 今日前复权价 × k
+```
+
+用前复权而非不复权，是为了在除权日也能拿到正确的复权收益率。
+实测该换算能**精确复现** baostock 的后复权值（相对误差 0）。
+成交量单位也做了对齐（akshare 是「手」，库中存「股」，×100）。
 
 跳过同步时**选股会基于数据库里已有的数据**，所以推送消息会标出真实的数据截止日期：
 
@@ -171,7 +206,7 @@ python main.py
 数据与运行日期一致时不会显示这个提醒。
 
 也可以手动强制跳过：`workflow_dispatch` 勾选 `skip_sync`，或在本机设 `SKIP_SYNC=1`
-（跳过全部 baostock 交互，只跑策略，用于接口不可达时快速出结果）。
+（跳过全部数据抓取——baostock 与 akshare 兜底都不跑，只跑策略，用于快速出结果）。
 
 ### 5. 推送方式
 
@@ -239,7 +274,10 @@ Sequoia-X/
 ├── .github/workflows/daily.yml  # GitHub Actions：定时选股（缓存+种子两级数据）
 ├── main.py                      # 入口：argparse 分发日常/回填模式
 ├── pyproject.toml               # 依赖声明 + ruff/pytest 配置
-├── .env.example                 # 环境变量模板
+├── RUNNING.md                   # 【本地运行指南】安装 / 配置 / 建库 / 排错
+├── config.example.toml          # 本地配置文件模板（cp 成 config.local.toml 后填值）
+├── config.local.toml            # 【已 gitignore】本机真实配置，不会被提交
+├── .env.example                 # 传统环境变量模板（仍兼容）
 ├── data/                        # SQLite 数据库（运行时生成，不入 git）
 │   └── seed/sequoia_v2.db.gz    # 数据库种子（Actions 冷启动用，详见同目录 README）
 ├── sequoia_x/
