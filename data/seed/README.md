@@ -59,8 +59,10 @@ print("压缩后:", round(os.path.getsize("data/seed/sequoia_v2.db.gz") / 1024 /
 PY
 ```
 
-然后提交 `data/seed/sequoia_v2.db.gz` 即可。下一轮 Actions 若缓存已存在，会继续用缓存，
-**不会**用新种子覆盖 —— 需要清理缓存（Actions → Caches → 删掉 `sequoia-db-*`）才会重新引导。
+然后提交 `data/seed/sequoia_v2.db.gz` 即可。
+
+工作流的缓存 key 里带了这个种子文件的哈希，所以**种子一换，旧缓存自动不再匹配**，
+下一轮会自动用新种子重新引导，不需要手工去 Actions → Caches 删缓存。
 
 ## 注意
 

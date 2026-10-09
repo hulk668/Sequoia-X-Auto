@@ -60,13 +60,15 @@ jobs:
 
       # 数据库 117MB，超过 GitHub 单文件 100MB 限制且被 .gitignore 排除，
       # 因此用滚动缓存持久化：restore-keys 命中最近一次，key 用 run_id 保证每轮都保存新副本。
+      # key 里带上种子文件的哈希：种子一更新（换了新版数据库）哈希就变，
+      # 旧缓存自动不再匹配 → 自动改用新种子重新引导，无需手工清理 Caches。
       - name: 恢复数据库缓存
         uses: actions/cache@v4
         with:
           path: data/sequoia_v2.db
-          key: sequoia-db-${{ github.run_id }}
+          key: sequoia-db-${{ hashFiles('data/seed/sequoia_v2.db.gz') }}-${{ github.run_id }}
           restore-keys: |
-            sequoia-db-
+            sequoia-db-${{ hashFiles('data/seed/sequoia_v2.db.gz') }}-
 
       # 缓存未命中时（首次运行 / 缓存被 GitHub 清理），从仓库内的 gzip 种子引导出初始数据库。
       # 种子文件与生成方式见 data/seed/README.md
