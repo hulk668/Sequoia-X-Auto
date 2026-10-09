@@ -1,12 +1,13 @@
 """配置管理模块：通过 pydantic-settings 从环境变量或 .env 文件加载系统配置。"""
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     db_path: str = "data/sequoia_v2.db"
     start_date: str = "2024-01-01"
-    pushplus_token: str  # 必填字段，缺失时抛出 ValidationError
+    pushplus_token: str  # 必填字段，缺失或为空时抛出 ValidationError
     strategy_webhooks: dict[str, str] = {}
 
     model_config = SettingsConfigDict(
@@ -15,6 +16,24 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",  # <--- 加上这一行！让 Pydantic 放行未定义的变量
     )
+
+    @field_validator("pushplus_token")
+    @classmethod
+    def _pushplus_token_not_blank(cls, v: str) -> str:
+        """拒绝空 token。
+
+        只声明 `pushplus_token: str` 只能拦住"字段完全缺失"的情况；
+        如果环境变量存在但值是空字符串（CI 中未配置的 Secret 正是如此），
+        空串对 str 类型依然合法，会一路带到推送阶段才以
+        PushPlus 的 "token不能为空" 失败。这里提前拦掉，快速报错。
+        """
+        if not v or not v.strip():
+            raise ValueError(
+                "PUSHPLUS_TOKEN 为空。请在 .env 中填写，或设置环境变量 PUSHPLUS_TOKEN；"
+                "GitHub Actions 上需在仓库 Settings → Secrets and variables → Actions "
+                "中配置名为 PUSHPLUS_TOKEN 的 repository secret。"
+            )
+        return v.strip()
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, **kwargs):  # type: ignore[override]

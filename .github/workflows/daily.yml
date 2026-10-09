@@ -41,6 +41,16 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # 最先校验推送 Token：未配置的 Secret 会以"空字符串"形式注入，
+      # 不拦的话要等跑完全部策略、在推送阶段才会失败，白费几分钟。
+      - name: 校验推送 Token
+        run: |
+          if [ -z "${PUSHPLUS_TOKEN}" ]; then
+            echo "::error::PUSHPLUS_TOKEN 为空。请到仓库 Settings → Secrets and variables → Actions → New repository secret，新增名为 PUSHPLUS_TOKEN 的 secret。"
+            exit 1
+          fi
+          echo "PUSHPLUS_TOKEN 已配置（长度 ${#PUSHPLUS_TOKEN}，值已由 GitHub 自动脱敏）"
+
       - name: 准备 Python
         uses: actions/setup-python@v5
         with:

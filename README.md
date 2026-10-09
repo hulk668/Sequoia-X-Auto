@@ -102,6 +102,21 @@ python main.py
 
 未配置的策略会自动回落到全局 `PUSHPLUS_TOKEN`（空值会被忽略，不会覆盖默认 token）。
 
+> **⚠️ Token 从哪来？**
+> 只能来自 GitHub Secrets —— 工作流是通过 `PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}`
+> 把它注入成环境变量的。
+>
+> `.env` 和 `.env.example` 在 Actions 上都**不可用**：
+> - `.env` 被 `.gitignore` 排除，checkout 时根本不存在；
+> - `.env.example` 只是给人 `cp .env.example .env` 用的**模板**，
+>   程序里 `load_dotenv()` 默认只读 `.env`，永远不会读 `.env.example`。
+>
+> **千万不要把真实 token 写进 `.env.example`** —— 它会被提交进仓库、公开可见。
+> 如果曾经写过，请立刻去 PushPlus 后台重置 token 并更新 Secret，光删文件没用（git 历史里还在）。
+
+工作流第一步就会校验 `PUSHPLUS_TOKEN` 是否为空，没配会立刻报错退出，
+不会白跑几分钟才在推送阶段失败。
+
 ### 2. 定时运行
 
 已配置 `cron: '15 11 * * 1-5'`，即**每周一至周五北京时间 19:15** 自动执行增量更新 + 选股 + 推送。
