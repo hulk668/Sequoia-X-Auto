@@ -231,8 +231,17 @@ class DataEngine:
 
         count = len(df)
         with sqlite3.connect(self.db_path) as conn:
-            for d in df["date"].unique().tolist():
-                conn.execute("DELETE FROM stock_daily WHERE date = ?", (d,))
+            # 只删除本次真正抓到的 (symbol, date) 组合，用于覆盖写入（幂等）。
+            # 不能改成按 date 整日删除：多进程抓取时部分 worker 可能掉线，
+            # 单轮结果往往不完整，整日删除会把其它 worker 已写入的数据一并抹掉，
+            # 导致同一天的数据越补越少。
+            pairs = {
+                (row[0], row[1])
+                for row in df[["symbol", "date"]].itertuples(index=False, name=None)
+            }
+            conn.executemany(
+                "DELETE FROM stock_daily WHERE symbol = ? AND date = ?", pairs
+            )
             df.to_sql("stock_daily", conn, if_exists="append", index=False, method="multi", chunksize=500)
             conn.commit()
 
