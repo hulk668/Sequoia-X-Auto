@@ -81,10 +81,63 @@ python main.py
 
 ---
 
+## GitHub Actions 部署 | Deploy on Actions
+
+无需服务器，直接跑在 GitHub Actions 上。工作流文件：`.github/workflows/daily.yml`。
+
+### 1. 配置 Secrets
+
+仓库 → **Settings → Secrets and variables → Actions → New repository secret**：
+
+| Secret 名称 | 必填 | 说明 |
+|---|---|---|
+| `PUSHPLUS_TOKEN` | ✅ | PushPlus 全局推送 Token |
+| `STRATEGY_WEBHOOK_MA_VOLUME` | 可选 | 均线放量策略专属 Token |
+| `STRATEGY_WEBHOOK_TURTLE` | 可选 | 海龟突破策略专属 Token |
+| `STRATEGY_WEBHOOK_FLAG` | 可选 | 高窄旗形策略专属 Token |
+| `STRATEGY_WEBHOOK_SHAKEOUT` | 可选 | 涨停洗盘策略专属 Token |
+| `STRATEGY_WEBHOOK_LIMIT_DOWN` | 可选 | 上升跌停策略专属 Token |
+| `STRATEGY_WEBHOOK_RPS` | 可选 | RPS 突破策略专属 Token |
+| `STRATEGY_WEBHOOK_PRIVATE_PLACEMENT` | 可选 | 定增策略专属 Token |
+
+未配置的策略会自动回落到全局 `PUSHPLUS_TOKEN`（空值会被忽略，不会覆盖默认 token）。
+
+### 2. 首次运行
+
+Actions 页面 → 左侧选 **Sequoia-X 每日选股** → **Run workflow** → mode 选 `backfill`。
+
+首次运行会全市场回填历史 K 线（GitHub 服务器访问 baostock 约 20~60 分钟）。
+其实不手动触发也行 —— 定时任务发现数据库为空时会**自动先回填再选股**。
+
+### 3. 定时运行
+
+已配置 `cron: '15 11 * * 1-5'`，即**每周一至周五北京时间 19:15** 自动执行增量更新 + 选股 + 推送。
+
+### 4. 数据持久化说明
+
+数据库 `data/sequoia_v2.db` 有 117MB，超过 GitHub 单文件 100MB 限制且被 `.gitignore` 排除，
+因此**不入库**，改用 `actions/cache` 滚动缓存持久化：
+
+- 每轮运行前按 `restore-keys: sequoia-db-` 恢复最近一次缓存；
+- 运行后用 `sequoia-db-<run_id>` 保存新副本；
+- 缓存连续 7 天未被访问会被 GitHub 清理，届时任务自动重新回填，无需人工干预。
+
+### 5. 注意事项
+
+- **定时任务依赖默认分支**：工作流文件必须合入默认分支后 `schedule` 才会生效。
+- **60 天不活跃会被禁用**：仓库连续 60 天无提交，GitHub 会自动暂停定时任务，需在 Actions 页面手动重新启用；
+  仓库有其它提交活动即可保持激活。
+- **cron 可能延迟**：GitHub 定时任务在高峰期可能延迟数分钟到数十分钟，且不保证 100% 触发。
+- **首次失败可重跑**：回填逻辑支持断点续传（已入库的股票自动跳过），直接重跑即可继续。
+- 想改用更持久、可离线种库的方案（如 Release 附件存库），可以再单独调整。
+
+---
+
 ## 目录结构 | Project Structure
 
 ```
 Sequoia-X/
+├── .github/workflows/daily.yml  # GitHub Actions：定时选股 + 手动回填
 ├── main.py                      # 入口：argparse 分发日常/回填模式
 ├── pyproject.toml               # 依赖声明 + ruff/pytest 配置
 ├── .env.example                 # 环境变量模板

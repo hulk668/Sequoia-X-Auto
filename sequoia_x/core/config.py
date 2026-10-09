@@ -28,9 +28,11 @@ class Settings(BaseSettings):
         prefix = "STRATEGY_WEBHOOK_"
         webhooks: dict[str, str] = {}
         for key, value in os.environ.items():
-            if key.upper().startswith(prefix):
+            # 跳过空值：CI 中未配置的 Secret 会被注入为空字符串，
+            # 若不过滤会覆盖掉 default，导致推送使用空 token 而失败。
+            if key.upper().startswith(prefix) and value.strip():
                 strategy_key = key[len(prefix):].lower()
-                webhooks[strategy_key] = value
+                webhooks[strategy_key] = value.strip()
 
         # 注入到初始化数据中（通过 init_kwargs source）
         if webhooks:
@@ -49,9 +51,10 @@ class Settings(BaseSettings):
         prefix = "STRATEGY_WEBHOOK_"
         webhooks: dict[str, str] = dict(self.strategy_webhooks)
         for key, value in os.environ.items():
-            if key.upper().startswith(prefix):
+            # 同上：忽略空字符串，未配置的策略自动回落到全局 PUSHPLUS_TOKEN。
+            if key.upper().startswith(prefix) and value.strip():
                 strategy_key = key[len(prefix):].lower()
-                webhooks[strategy_key] = value
+                webhooks[strategy_key] = value.strip()
 
         # 使用 object.__setattr__ 绕过 pydantic 的不可变保护
         object.__setattr__(self, "strategy_webhooks", webhooks)
