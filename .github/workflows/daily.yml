@@ -56,6 +56,10 @@ jobs:
       # ── 冷启动种子（详见 data/seed/README.md）──
       SEED_BARS: '400'                 # 降级补数时每只票保留的 K 线根数
       SEED_FALLBACK_BACKFILL: 'true'   # 取不到 Release 种子时，是否降级为自行补数
+      # 全市场股票池下限。行数够多 ≠ 池子完整：库可能只剩沪市主板 1332 只
+      # （历史上的残缺种子），这时行数照样上万，但选股覆盖面只有全市场的 1/4。
+      # 因此种子的可用性按「股票数」判定，与 seed.yml 保持一致。
+      MIN_SYMBOLS: '4000'
 
     steps:
       - name: 检出代码
@@ -139,12 +143,13 @@ jobs:
           # 统一走下面的降级路径。写成 if 条件而不是裸命令，
           # 是为了让失败不触发 bash -e 直接中断（那样子就没机会降级了）。
           # 校验用单行 python -c：多行内容顶格会破坏 YAML block scalar 的缩进。
+          # 按「股票数 ≥ MIN_SYMBOLS」而不是「行数 > 0」判定：行数够多不等于池子完整。
           if gh release download "$TAG" \
                  --repo "${GITHUB_REPOSITORY}" \
                  --pattern 'sequoia_v2.db.gz' \
                  --dir data/seed --clobber \
              && gunzip -c data/seed/sequoia_v2.db.gz > data/sequoia_v2.db \
-             && python -c "import sqlite3,sys; n=sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0]; print(f'种子含 {n} 行行情'); sys.exit(0 if n > 0 else 1)"; then
+             && python -c "import sqlite3,sys,os; c=sqlite3.connect('data/sequoia_v2.db'); n=c.execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0]; s=c.execute('SELECT COUNT(DISTINCT symbol) FROM stock_daily').fetchone()[0]; m=int(os.environ.get('MIN_SYMBOLS','4000')); print(f'种子含 {n} 行 / {s} 只股票（下限 {m}）'); sys.exit(0 if n > 0 and s >= m else 1)"; then
             echo "已从 Release '$TAG' 引导数据库：$(du -h data/sequoia_v2.db | cut -f1)"
             rm -f data/seed/sequoia_v2.db.gz
             exit 0
@@ -156,6 +161,7 @@ jobs:
           echo "::warning::  1) 该 tag 的 Release 是否已创建？见 ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases"
           echo "::warning::  2) data/seed/VERSION 里的 tag 是否写错（当前值：$TAG）？"
           echo "::warning::  3) 想重建种子：手动触发「Sequoia-X 发布数据库种子」工作流。"
+          echo "::warning::  4) 种子的股票数是否不足 ${MIN_SYMBOLS} 只？（残缺种子会被拒绝，见 data/seed/README.md）"
 
           if [ "${SEED_FALLBACK_BACKFILL}" != "true" ]; then
             echo "::error::已关闭降级补数（SEED_FALLBACK_BACKFILL），终止。"
@@ -180,9 +186,18 @@ jobs:
             exit 1
           fi
           ROWS=$(python -c "import sqlite3;print(sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0])" 2>/dev/null || echo 0)
-          echo "数据库现有 $ROWS 行"
+          SYMBOLS=$(python -c "import sqlite3;print(sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(DISTINCT symbol) FROM stock_daily').fetchone()[0])" 2>/dev/null || echo 0)
+          echo "数据库现有 $ROWS 行 / $SYMBOLS 只股票（下限 $MIN_SYMBOLS）"
           if [ "$ROWS" = "0" ]; then
             echo "::error::数据库为空，无法执行增量选股。请检查 Release 里的种子资产是否损坏。"
+            exit 1
+          fi
+          # 兜底：缓存里的库可能退化成残缺池（daily 的增量同步只更新已有的票，
+          # 不会把池子扩回来）。与其推出一份只覆盖 1/4 市场的选股结果，
+          # 不如响亮地失败 —— 见 data/seed/README.md。
+          if [ "$SYMBOLS" -lt "$MIN_SYMBOLS" ]; then
+            echo "::error::股票池只有 $SYMBOLS 只，低于下限 $MIN_SYMBOLS —— 拒绝继续（否则选股只覆盖 1/4 市场）。"
+            echo "::error::常见原因：Release 里的种子是残缺版本（如 ~22MB / 1332 只）。换个新 tag 重发种子即可，见 data/seed/README.md。"
             exit 1
           fi
 

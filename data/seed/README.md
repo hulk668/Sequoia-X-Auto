@@ -6,7 +6,7 @@ Actions 冷启动用的数据库快照。**压缩包不放仓库，放在 GitHub
 
 | 文件 | 作用 |
 |---|---|
-| `VERSION` | 当前种子对应哪个 Release tag，例如 `seed-2026-10-09`。内容的哈希参与 daily 的缓存 key |
+| `VERSION` | 当前种子对应哪个 Release tag，例如 `seed-2026-10-10`。内容的哈希参与 daily 的缓存 key |
 | `README.md` | 本文件 |
 
 `sequoia_v2.db.gz` 已被 `.gitignore` 排除。
@@ -33,9 +33,9 @@ Actions 冷启动用的数据库快照。**压缩包不放仓库，放在 GitHub
 ```
 仓库缓存未命中
    ↓
-读 data/seed/VERSION  →  tag = seed-2026-10-09
+读 data/seed/VERSION  →  tag = seed-2026-10-10
    ↓
-gh release download seed-2026-10-09 --pattern 'sequoia_v2.db.gz' --dir data/seed
+gh release download seed-2026-10-10 --pattern 'sequoia_v2.db.gz' --dir data/seed
    ↓
 gunzip → data/sequoia_v2.db
    ↓
@@ -83,14 +83,14 @@ gunzip → data/sequoia_v2.db
 # 1) 本机数据库补齐后，打包（自动裁剪 + VACUUM + gzip -9）
 python scripts/pack_seed.py --bars 400
 # 复制 data\sequoia_v2.db（301.0 MB）→ 临时目录
-# 原始：2,405,832 行 / 5,224 只 / 2024-01-02 ~ 2026-10-09 / 名称 5,561 条
-# 裁剪：每只保留最近 400 根 → 删除 344,497 行，剩 2,061,335 行
+# 原始：2,405,432 行 / 5,223 只 / 2024-01-02 ~ 2026-10-09 / 名称 5,561 条
+# 裁剪：每只保留最近 400 根 → 删除 344,497 行，剩 2,060,935 行
 # 完成：data/seed/sequoia_v2.db.gz
-#   75.9 MB（源库 301.0 MB → VACUUM 后 250.7 MB，相对 VACUUM 后压缩率 3.30x，
-#            sha256 a3c0ab163cc09f0c…）
+#   75.9 MB（源库 300.9 MB → VACUUM 后 250.6 MB，相对 VACUUM 后压缩率 3.30x，
+#            sha256 3fb4d863ad8ceb5f…）
 
 # 2) 到 GitHub → Releases → Draft a new release
-#    tag 例如 seed-2026-10-09，把 data/seed/sequoia_v2.db.gz 拖进去发布
+#    tag 例如 seed-2026-10-10，把 data/seed/sequoia_v2.db.gz 拖进去发布
 
 # 3) 换了新 tag 的话，把 data/seed/VERSION 也改成同一个 tag 再提交
 ```
@@ -119,22 +119,22 @@ python main.py --backfill --limit 100
 
 | 项 | 值 |
 |---|---|
-| tag | `seed-2026-10-09` |
-| 覆盖股票 | **5224 只**（全市场 A 股，剔除北交所） |
-| 日期范围 | 2024-01-02 ~ 2026-10-09 |
-| 行情行数 | 2,061,335（每只截断到最近 400 根） |
+| tag | `seed-2026-10-10` |
+| 覆盖股票 | **5,223 只**（全市场 A 股，剔除北交所） |
+| 日期范围 | 2024-11-05 ~ 2026-10-09（裁剪后，每只留最近 400 根） |
+| 行情行数 | 2,060,935（每只截断到最近 400 根） |
 | 股票名称 | 5,561 条（含已退市代码；见 `stock_name` 表） |
-| 压缩后大小 | 75.9 MB（gzip -9） |
-| VACUUM 后大小 | 250.7 MB |
-| sha256 | `a3c0ab163cc09f0c3e1dbede5258321798e322eda5abf8de20833d50bd2d99df` |
+| 压缩后大小 | 75.9 MB（gzip -9，79,600,485 字节） |
+| VACUUM 后大小 | 250.6 MB（262,799,360 字节） |
+| sha256 | `3fb4d863ad8ceb5f765eab5fe58d78ba88438d1d0f266e7c4ddb23c8fb76ec24` |
 
 各板块覆盖（按代码数）：
 
 | 板块 | 只数 | 数据来源 |
 |---|---|---|
-| 沪市主板（600/601/603/605） | 1702 | baostock（后复权） |
+| 沪市主板（600/601/603/605） | 1701 | baostock（后复权） |
 | 深市主板（000/001/002/003） | 1495 | 腾讯（前复权） |
-| 创业板（300/301） | 1408 | 腾讯（前复权） |
+| 创业板（300/301/302） | 1409 | 腾讯（前复权） |
 | 科创板（688/689） | 618 | 腾讯（前复权） |
 
 > ⚠️ 北交所在东财与腾讯的日K接口里都拿不到数据，已被排除；`get_boards` 同样会跳过它。

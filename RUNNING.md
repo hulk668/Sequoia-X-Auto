@@ -94,10 +94,10 @@ turtle = "该策略专属的token"
 
 **B. 从种子解压（推荐，几秒完成）**
 
-种子压缩包**不在仓库里**，在 **GitHub Release** 上（压缩后 ~76MB，覆盖全市场 5224 只）：
+种子压缩包**不在仓库里**，在 **GitHub Release** 上（压缩后 75.9MB，覆盖全市场 5223 只）：
 
 ```bash
-TAG=$(cat data/seed/VERSION)          # 例如 seed-2026-10-09
+TAG=$(cat data/seed/VERSION)          # 例如 seed-2026-10-10
 
 # Git Bash / macOS / Linux（需要 gh CLI）
 gh release download "$TAG" --pattern 'sequoia_v2.db.gz' --dir data/seed
