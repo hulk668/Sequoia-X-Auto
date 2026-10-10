@@ -14,10 +14,10 @@ class PrivatePlacementStrategy(BaseStrategy):
     """定增公告监控策略。
 
     数据源：akshare stock_qbzf_em()（东方财富-全部增发）
-    逻辑：筛选最近 7 天内发行日期的定向增发公告，推送至飞书。
+    逻辑：筛选最近 7 天内发行日期的定向增发公告，纳入当轮 PushPlus 汇总推送。
 
     Attributes:
-        webhook_key: 路由到 'private_placement' 飞书机器人。
+        webhook_key: 路由到 'private_placement' 专属推送 token。
     """
 
     webhook_key: str = "private_placement"
@@ -37,6 +37,19 @@ class PrivatePlacementStrategy(BaseStrategy):
             logger.info("PrivatePlacementStrategy 无定增数据")
             return []
 
+        # 解析阶段的每一步都依赖 akshare 的列名（发行方式/发行日期/股票代码），
+        # 上游一改字段就是 KeyError。必须一起兜住 —— 否则异常会冒出 run()，
+        # 被 main.py 的外层 except 接走并 sys.exit(1)，整轮推送全丢。
+        try:
+            return self._parse(df)
+        except Exception as exc:
+            logger.error(
+                f"PrivatePlacementStrategy 解析定增数据失败（上游字段可能已变化）：{exc}"
+            )
+            return []
+
+    def _parse(self, df) -> list[str]:
+        """从原始 DataFrame 里筛出近 N 天的定向增发公告，返回去重后的代码列表。"""
         # 只保留定向增发（排除公开增发）
         df = df[df["发行方式"] == "定向增发"]
 

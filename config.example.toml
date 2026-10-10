@@ -24,11 +24,17 @@ start_date = "2024-01-01"
 # 获取地址：https://www.pushplus.plus/push1.html
 pushplus_token = "your-pushplus-token-here"
 
-# 是否只跑策略、跳过所有数据抓取（默认 false）
-# 接口不通时设成 true，可跳过同步直接用库里现有数据出选股结果
+# 数据更新通道：是否直接使用 akshare（默认 false）
+# 推荐设成 true —— baostock 免费服务长期不稳定，"先探测再回退"每轮都要白等一次探测
+prefer_akshare = true
+
+# 是否完全不更新数据、只跑策略（默认 false）
+# 打开后不碰 akshare、不碰 baostock、也不刷新股票名称，直接用库里现有数据出结果。
+# 优先级高于 prefer_akshare。
 skip_sync = false
 
-# baostock 不可用时是否改用 akshare 兜底拉取增量数据（默认 true）
+# baostock 探测不通时是否回退 akshare（默认 true）
+# 只在 prefer_akshare = false 时有意义
 enable_akshare_fallback = true
 
 # 策略专属推送 Token（可选）。未配置的策略自动使用上面的全局 pushplus_token。

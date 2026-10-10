@@ -1,7 +1,5 @@
 """高旗形整理策略：强动量后极度收敛缩量。"""
 
-import pandas as pd
-
 from sequoia_x.core.logger import get_logger
 from sequoia_x.strategy.base import BaseStrategy
 
@@ -12,16 +10,18 @@ class HighTightFlagStrategy(BaseStrategy):
     """高旗形整理策略。
 
     选股条件（向量化，严禁 iterrows）：
-    1. 强动量：过去40天区间最高价 / 区间最低价 > 1.6（涨幅超60%）
+    1. 强动量：过去40天区间最高价 / 区间最低价 > 1.6（振幅超60%）
     2. 极度收敛：最近10天区间最高价 / 区间最低价 < 1.15（振幅低于15%）
-    3. 缩量：今日 volume < 过去20日 volume 均值的 0.6 倍
+    3. 高位抗跌：最近10天最低价 >= 过去40天最高价 × 0.8（未从高位跌掉两成）
+    4. 缩量：今日 volume < **前20日**（不含今日）volume 均值的 0.6 倍
 
     Attributes:
-        webhook_key: 路由到 'flag' 专属飞书机器人。
+        webhook_key: 路由到 'flag' 专属推送 token。
     """
 
     webhook_key: str = "flag"
-    _MIN_BARS: int = 40  # 至少需要 40 根 K 线
+    # 至少需要 40 根 K 线（tail(40) 窗口）
+    _MIN_BARS: int = 40
 
     def run(self) -> list[str]:
         """

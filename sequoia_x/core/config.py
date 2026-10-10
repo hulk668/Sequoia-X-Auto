@@ -61,9 +61,12 @@ class Settings(BaseSettings):
     start_date: str = "2024-01-01"
     pushplus_token: str  # 必填字段，缺失或为空时抛出 ValidationError
     strategy_webhooks: dict[str, str] = {}
-    # 仅做策略选股、跳过所有数据抓取（baostock 与 akshare 兜底都不跑）
+    # 仅做策略选股、跳过所有数据抓取（baostock 与 akshare 都不跑）
     skip_sync: bool = False
-    # baostock 不可用时，是否改用 akshare 兜底拉取增量数据
+    # 直接指定用 akshare 更新增量数据，不探测 baostock。
+    # baostock 免费服务长期不稳定，CI 里"先探路再兜底"等于每次都白等一轮。
+    prefer_akshare: bool = False
+    # baostock 可用但查询失败时，是否允许回落到 akshare
     enable_akshare_fallback: bool = True
 
     model_config = SettingsConfigDict(
@@ -73,7 +76,7 @@ class Settings(BaseSettings):
         extra="ignore",  # 放行未定义的变量
     )
 
-    @field_validator("skip_sync", "enable_akshare_fallback", mode="before")
+    @field_validator("skip_sync", "prefer_akshare", "enable_akshare_fallback", mode="before")
     @classmethod
     def _blank_bool_is_false(cls, v: object) -> object:
         """把空字符串按 False 处理。
@@ -145,20 +148,6 @@ class Settings(BaseSettings):
 
         # 使用 object.__setattr__ 绕过 pydantic 的不可变保护
         object.__setattr__(self, "strategy_webhooks", webhooks)
-
-    def get_webhook_url(self, webhook_key: str) -> str:
-        """
-        根据 webhook_key 返回对应的推送目标标识。
-
-        优先从 strategy_webhooks 查找，找不到则返回 'default'。
-
-        Args:
-            webhook_key: 策略标识，如 'ma_volume'、'turtle'。
-
-        Returns:
-            对应的 webhook_key 字符串。
-        """
-        return self.strategy_webhooks.get(webhook_key.lower(), "default")
 
 
 _settings: Settings | None = None

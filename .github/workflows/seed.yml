@@ -1,0 +1,202 @@
+name: Sequoia-X 发布数据库种子
+
+# ── 用途 ──────────────────────────────────────────────────
+# 把「当前最新的数据库」打包成 gzip 种子，发布到 GitHub Release，
+# 供 daily 工作流在缓存未命中（首次运行 / 缓存被 GitHub 回收）时冷启动。
+#
+# 为什么种子放 Release 而不是仓库里：
+#   - 解压后 300MB+、压缩后 ~76MB，进仓库会拖慢每一次 checkout，
+#     而且超过 50MB 后每次 push 都会收到 GitHub 的大文件警告；
+#   - Release 资产不占仓库体积、不影响 clone、单文件上限 2GB。
+#
+# ── 什么时候需要跑 ──────────────────────────────────────────
+# 1. 首次启用：把现有数据库发成种子（tag 用 data/seed/VERSION 的当前值）。
+# 2. 想让新机器/新缓存从更新的数据冷启动：换一个**新的 tag**
+#    （例如 seed-2026-11-01），工作流会自动更新 VERSION 并提交，
+#    哈希一变 → daily 的旧缓存自动失效 → 下轮自动下载新种子。
+# 3. 同一个 tag 重发：直接覆盖资产，VERSION 不变，不影响既有缓存。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag（留空 = 使用 data/seed/VERSION 的当前值，即覆盖重发）'
+        type: string
+        default: ''
+      bars:
+        description: '每只票保留最近多少根 K 线（越小种子越小；0 = 不裁剪）'
+        type: string
+        default: '400'
+      backfill_if_empty:
+        description: '缓存为空时自动补数（关掉则直接报错退出）'
+        type: boolean
+        default: true
+
+# 与 daily 共用同一个并发组：两边都会写数据库缓存，串行更安全
+concurrency:
+  group: sequoia-x
+  cancel-in-progress: false
+
+permissions:
+  contents: write          # 需要：创建 Release + 提交 VERSION
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    env:
+      PYTHONUNBUFFERED: '1'
+      TZ: Asia/Shanghai
+      DB_PATH: data/sequoia_v2.db
+      START_DATE: '2024-01-01'
+      # 本工作流不推送，但 Settings 里 pushplus_token 是必填字段，
+      # 缺了会在 get_settings() 直接抛 ValidationError。给个占位值即可。
+      PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN || 'seed-workflow-no-push' }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      # 取最近一次滚动缓存 —— 前缀匹配、不看 VERSION 哈希，
+      # 因为这里要的就是「当前最新的数据」，而不是「某个种子对应的数据」。
+      - name: 恢复数据库缓存（最近一次）
+        uses: actions/cache/restore@v4
+        with:
+          path: data/sequoia_v2.db
+          key: sequoia-db-publish-${{ github.run_id }}   # 必定未命中，真正的命中靠 restore-keys
+          restore-keys: |
+            sequoia-db-
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install akshare baostock "pydantic-settings>=2.0" python-dotenv rich pandas requests
+
+      - name: 确认数据库可用（必要时补数）
+        run: |
+          set -eo pipefail
+          if [ -f data/sequoia_v2.db ]; then
+            ROWS=$(python -c "import sqlite3;print(sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0])")
+            echo "从缓存取到数据库：$ROWS 行"
+            if [ "$ROWS" -gt 0 ]; then
+              exit 0
+            fi
+            echo "缓存里的数据库是空的，按未命中处理"
+            rm -f data/sequoia_v2.db
+          fi
+
+          if [ "${{ inputs.backfill_if_empty }}" != "true" ]; then
+            echo "::error::缓存未命中的，且本次未勾选自动补数。请先跑一次 daily 工作流让缓存建立起来。"
+            exit 1
+          fi
+
+          echo "缓存未命中，开始全市场补数（东财 → 腾讯兜底）……"
+          python main.py --backfill --bars "${{ inputs.bars }}"
+
+      - name: 打包种子
+        id: pack
+        run: |
+          set -eo pipefail
+          python -u scripts/pack_seed.py --bars "${{ inputs.bars }}" | tee /tmp/pack.log
+          grep '^SEED_' /tmp/pack.log >> "$GITHUB_OUTPUT"
+
+      - name: 确定 tag
+        id: tag
+        run: |
+          set -eo pipefail
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="$(tr -d '[:space:]' < data/seed/VERSION)"
+            echo "未指定 tag，使用 data/seed/VERSION 的当前值：$TAG"
+          fi
+          if [[ ! "$TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::tag '$TAG' 含非法字符（只允许字母数字 . _ -）"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: 发布到 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          ASSET="data/seed/sequoia_v2.db.gz"
+
+          # 单引号 heredoc：禁止 shell 展开，里面的 ${{ }} 由 Actions 在脚本执行前
+          # 就替换成字面量了，所以这里必须全部用 ${{ }} 表达式、别混用 ${GITHUB_xxx}。
+          NOTES=$(cat <<'EOF'
+          Sequoia-X 数据库冷启动种子。
+
+          - 覆盖：${{ steps.pack.outputs.SEED_SYMBOLS }} 只 / ${{ steps.pack.outputs.SEED_ROWS }} 行
+          - 体积：${{ steps.pack.outputs.SEED_BYTES }} 字节（gzip -9，解压后 ${{ steps.pack.outputs.SEED_SLIM_BYTES }} 字节）
+          - sha256：`${{ steps.pack.outputs.SEED_SHA256 }}`
+          - 生成：workflow run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          daily 工作流在缓存未命中时通过 `gh release download` 拉取本资产，
+          tag 取自仓库内 `data/seed/VERSION`。用法见 `data/seed/README.md`。
+          **请勿删除本 Release 的该资产**，否则缓存被回收后无法冷启动。
+          EOF
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release '$TAG' 已存在 → 覆盖资产"
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            echo "Release '$TAG' 不存在 → 新建"
+            gh release create "$TAG" "$ASSET" --title "数据库种子 $TAG" --notes "$NOTES"
+          fi
+
+          echo "✅ https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"
+
+      # 只有换了新 tag 才需要动 VERSION —— 它一变，daily 的缓存 key 哈希就变，
+      # 下一轮自动改用新种子重新引导（这正是"发新种子"的开关）。
+      - name: 同步 VERSION（必要时提交）
+        run: |
+          set -eo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          if [ "$(tr -d '[:space:]' < data/seed/VERSION)" = "$TAG" ]; then
+            echo "VERSION 已是 $TAG，无需提交（覆盖重发，既有缓存不受影响）"
+            exit 0
+          fi
+
+          printf '%s\n' "$TAG" > data/seed/VERSION
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # 显式列文件，绝不用 git add .（仓库公开，历史上泄露过 token）
+          git add data/seed/VERSION
+          git commit -m "chore(seed): 种子更新为 $TAG"
+          git push
+          echo "已把 VERSION 更新为 $TAG 并推送 —— daily 的旧缓存下轮自动失效"
+
+      - name: 汇总
+        if: always()
+        run: |
+          {
+            echo "## 种子发布结果"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| tag | \`${{ steps.tag.outputs.tag }}\` |"
+            echo "| 股票数 | ${{ steps.pack.outputs.SEED_SYMBOLS }} |"
+            echo "| 行情行数 | ${{ steps.pack.outputs.SEED_ROWS }} |"
+            echo "| 压缩后体积 | ${{ steps.pack.outputs.SEED_BYTES }} 字节 |"
+            echo "| sha256 | \`${{ steps.pack.outputs.SEED_SHA256 }}\` |"
+            echo "| 状态 | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed-publish-log-${{ github.run_id }}
+          path: /tmp/pack.log
+          if-no-files-found: ignore
+          retention-days: 7

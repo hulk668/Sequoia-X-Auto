@@ -1,6 +1,7 @@
 """数据引擎模块：负责 SQLite 行情数据存储与 baostock 增量同步。"""
 
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -37,8 +38,36 @@ CREATE TABLE IF NOT EXISTS stock_name (
 );
 """
 
-# akshare 兜底时的并发线程数（akshare 走 HTTP，用线程而不是进程更省）
+# 个股所属行业缓存（东财 F10 公司概况的 EM2016 分类）。
+# updated_at 为写入日期，用于 TTL 过期判断。
+_CREATE_BOARD_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS stock_board (
+    symbol     TEXT PRIMARY KEY,
+    board      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
+# 早期版本拿东财 F10「核心题材」当板块，口径不可靠：
+# 那套数据会把「一带一路」「央国企改革」「沪股通」这类泛主题排在最前，
+# 实测招商南油被标成「一带一路」，而它的真实行业是「港口航运」。
+# 换成 EM2016 行业分类后，旧的 stock_concept 表整张作废，这里顺手清掉，
+# 免得库里的错误数据以后被误读（幂等，只在下一次初始化时真正执行）。
+_DROP_LEGACY_CONCEPT_TABLE_SQL = "DROP TABLE IF EXISTS stock_concept;"
+
+# 行业缓存有效期（天）。行业分类几乎不变，缓存久一点，
+# 避免每轮选股都去反查已经不常变的信息。
+_BOARD_TTL_DAYS = 30
+
+# 并发拉取时的线程数（akshare 是 HTTP 任务，用线程比进程省）
 _AK_CONCURRENCY = 8
+
+# 东财 F10 公司概况接口（含 EM2016 行业分类）与批量大小。
+# 接口支持 `SECUCODE in (...)`，90 只股票只要 2 次请求，
+# 比早期「一只一发」省下大量往返。
+_EM_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_EM_ORGINFO_REPORT = "RPT_F10_BASIC_ORGINFO"
+_EM_BATCH_SIZE = 45
 
 
 def _bs_fetch_batch(tasks: list) -> list:
@@ -115,6 +144,88 @@ def _ak_fetch_one(task: tuple[str, str, str]) -> list[list]:
     return rows
 
 
+def _to_em_secucode(symbol: str) -> str:
+    """纯数字代码 → 东财 SECUCODE：6/9 → .SH，4/8 → .BJ，其余 → .SZ。"""
+    if symbol.startswith(("6", "9")):
+        return f"{symbol}.SH"
+    if symbol.startswith(("4", "8")):
+        return f"{symbol}.BJ"
+    return f"{symbol}.SZ"
+
+
+def _industry_from_em2016(em2016: str) -> str:
+    """从东财 EM2016 三级行业分类里取**第二级**作为行业板块名。
+
+    东财官方的行业分类是三级的，形如 `交通运输-港口航运-航运`
+    （门类-行业-细分）。第二级正好是行情软件里那个「行业板块」粒度：
+    既不会像门类（`交通运输`）那样把港口和高速混在一起，
+    也不会像细分（`航运`）那样碎到只剩一两只票。
+
+    实测招商南油 = `交通运输-港口航运-航运` → `港口航运`。
+
+    Returns:
+        行业名；分级数不足（极少数冷门票只有一级）时返回空串，
+        由调用方按「无板块」处理。
+    """
+    parts = [p.strip() for p in (em2016 or "").split("-") if p.strip()]
+    return parts[1] if len(parts) >= 2 else ""
+
+
+def _em_fetch_boards(symbols: list[str]) -> dict[str, str]:
+    """批量反查多只股票的所属行业，返回 {代码: 行业名}。
+
+    数据来自东财 F10 公司概况接口的 `EM2016` 字段（见 `_industry_from_em2016`）。
+
+    为什么不再用「核心题材」：实测那套口径对绝大多数票都给不出行业 ——
+    招商南油的「核心题材」是 `一带一路` / `央国企改革`，正确行业 `港口航运`
+    的 IS_PRECISE 反而是 0。全量比对 90 只票，EM2016 行业与旧口径**无一只相同**，
+    且分组更聚合（42 个板块 / 22 个单只 vs 旧口径 49 个板块 / 31 个单只）。
+
+    北交所（4/8 开头）在东财 F10 里没有数据，直接跳过，省下无谓请求。
+
+    Args:
+        symbols: 股票代码列表，允许重复。
+
+    Returns:
+        {代码: 行业名}；查不到或该批请求失败的股票不会出现在结果里
+        （调用方据此判断「无板块」，且失败不写缓存、下轮自然重试）。
+    """
+    codes = [s for s in dict.fromkeys(symbols) if not s.startswith(("4", "8"))]
+    if not codes:
+        return {}
+
+    import requests
+
+    found: dict[str, str] = {}
+    for i in range(0, len(codes), _EM_BATCH_SIZE):
+        chunk = codes[i : i + _EM_BATCH_SIZE]
+        expr = "(" + ",".join(f'"{_to_em_secucode(s)}"' for s in chunk) + ")"
+        params = {
+            "reportName": _EM_ORGINFO_REPORT,
+            "columns": "SECUCODE,EM2016",
+            "filter": f"(SECUCODE in {expr})",
+            "pageNumber": 1,
+            "pageSize": len(chunk),
+            "source": "HSF10",
+            "client": "PC",
+        }
+        try:
+            resp = requests.get(_EM_URL, params=params, timeout=15)
+            resp.raise_for_status()
+            rows = (resp.json().get("result") or {}).get("data") or []
+        except Exception as exc:  # noqa: BLE001 - 单批失败不影响其它批
+            logger.warning(f"行业批量反查失败（本批 {len(chunk)} 只）：{exc}")
+            continue
+
+        for row in rows:
+            symbol = str(row.get("SECUCODE") or "")[:6]
+            board = _industry_from_em2016(str(row.get("EM2016") or ""))
+            if symbol and board:
+                found[symbol] = board
+
+    return found
+
+
 def _probe_baostock() -> tuple[bool, str]:
     """探测 baostock 行情接口是否真的可用（拿一只样本股做最小查询）。
 
@@ -181,7 +292,9 @@ class DataEngine:
     def __init__(self, settings: Settings) -> None:
         self.db_path: str = settings.db_path
         self.start_date: str = settings.start_date
-        # baostock 不可用时是否改用 akshare 兜底
+        # 直接指定 akshare 作为数据源（不探测 baostock）
+        self.prefer_akshare: bool = settings.prefer_akshare
+        # baostock 探测不通时是否允许回落到 akshare
         self.enable_akshare_fallback: bool = settings.enable_akshare_fallback
         self._init_db()
 
@@ -191,6 +304,8 @@ class DataEngine:
             conn.execute(_CREATE_TABLE_SQL)
             conn.execute(_CREATE_INDEX_SQL)
             conn.execute(_CREATE_NAME_TABLE_SQL)
+            conn.execute(_CREATE_BOARD_TABLE_SQL)
+            conn.execute(_DROP_LEGACY_CONCEPT_TABLE_SQL)
             conn.commit()
         logger.info(f"数据库初始化完成：{self.db_path}")
 
@@ -226,9 +341,20 @@ class DataEngine:
     # ── 数据同步 ──
 
     def sync_today_bulk(self) -> int:
-        """多进程并行通过 baostock 拉取增量数据（后复权），写入 SQLite。"""
+        """增量同步行情数据（后复权），写入 SQLite。
+
+        数据源：
+        - `prefer_akshare=True`：直接走 akshare，不探测 baostock；
+        - 否则先探测 baostock，不可用且 `enable_akshare_fallback=True` 时回落 akshare。
+        """
         from datetime import date, timedelta
         from multiprocessing import Pool
+
+        # baostock 免费服务长期不稳定，CI 里"先探路再兜底"等于每轮都白等一次探测，
+        # 直接指定 akshare 就把这段时间省掉。
+        if self.prefer_akshare:
+            logger.info("PREFER_AKSHARE 已开启：跳过 baostock，直接用 akshare 更新增量数据")
+            return self.sync_via_akshare()
 
         today_str = date.today().strftime("%Y-%m-%d")
 
@@ -262,12 +388,12 @@ class DataEngine:
             logger.warning(f"baostock 数据接口不可用（{reason}）。")
             if not self.enable_akshare_fallback:
                 logger.warning(
-                    f"akshare 兜底已关闭，跳过本次增量同步。"
+                    f"akshare 回退已关闭，跳过本次增量同步。"
                     f"数据库数据截止 {self.get_latest_date()}，"
                     f"本次选股将基于该日期及之前的数据。"
                 )
                 return 0
-            logger.warning("改用 akshare 兜底拉取增量数据...")
+            logger.warning("改用 akshare 拉取增量数据...")
             return self.sync_via_akshare()
 
         n_workers = min(8, len(tasks))
@@ -289,12 +415,12 @@ class DataEngine:
 
         logger.info(f"sync_today_bulk: 写入 {count} 条数据")
 
-    # ── akshare 兜底 ──
+    # ── akshare 增量同步 ──
 
     def _load_anchor(self) -> dict[str, tuple[str, float]]:
         """取每只股票在库中的最后交易日与该日的后复权收盘价。
 
-        这是 akshare 兜底换算的锚点：不同数据源复权基准不同，
+        这是跨源换算的锚点：不同数据源复权基准不同，
         必须用库中已有的后复权价 + 新数据源的相对涨跌来推导，不能直接写入。
 
         Returns:
@@ -314,7 +440,10 @@ class DataEngine:
         return {s: (dt, float(c)) for s, dt, c in rows if c}
 
     def sync_via_akshare(self, today: str | None = None) -> int:
-        """akshare 兜底增量同步：baostock 不可用时使用。
+        """通过 akshare（东财）拉增量行情，换算到库中的后复权基准后写入。
+
+        这是 baostock 之外的数据更新通道：`prefer_akshare=True` 时直接用它，
+        否则作为 baostock 探测不通时的回退。两种情形走的都是同一条换算逻辑。
 
         为什么不把 akshare 的行情直接写进库：**不同数据源的复权基准不同**。
         实测同一只票同一日（sh600000 / 2026-10-09）：
@@ -349,7 +478,7 @@ class DataEngine:
 
         anchors = self._load_anchor()
         if not anchors:
-            logger.warning("akshare 兜底：本地无任何行情数据，无法确定换算锚点，跳过")
+            logger.warning("akshare：本地无任何行情数据，无法确定换算锚点，跳过")
             return 0
 
         tasks = [
@@ -358,18 +487,18 @@ class DataEngine:
             if last_date < today
         ]
         if not tasks:
-            logger.info("akshare 兜底：所有股票已是最新，无需更新")
+            logger.info("akshare：所有股票已是最新，无需更新")
             return 0
 
-        logger.info(f"akshare 兜底：需要更新 {len(tasks)} 只股票，并发拉取中...")
+        logger.info(f"akshare：需要更新 {len(tasks)} 只股票，并发拉取中...")
 
         records: list[list] = []
         failed = 0
         try:
             with ThreadPoolExecutor(max_workers=_AK_CONCURRENCY) as pool:
                 fetched = list(pool.map(_ak_fetch_one, tasks))
-        except Exception as exc:  # noqa: BLE001 - 兜底路径失败不应中断主流程
-            logger.warning(f"akshare 兜底：并发拉取异常，放弃本次兜底：{exc}")
+        except Exception as exc:  # noqa: BLE001 - 数据更新失败不应中断主流程
+            logger.warning(f"akshare：并发拉取异常，放弃本次更新：{exc}")
             return 0
 
         for (symbol, last_date, _end), rows in zip(tasks, fetched):
@@ -392,7 +521,7 @@ class DataEngine:
 
         if not records:
             logger.warning(
-                f"akshare 兜底：未取得任何新数据（{failed}/{len(tasks)} 只拉取失败）。"
+                f"akshare：未取得任何新数据（{failed}/{len(tasks)} 只拉取失败）。"
                 f"数据库数据截止 {self.get_latest_date()}，"
                 f"本次选股将基于该日期及之前的数据。"
             )
@@ -403,7 +532,7 @@ class DataEngine:
             columns=["symbol", "date", "open", "high", "low", "close", "volume", "turnover"],
         )
         count = self._upsert_daily(df)
-        logger.info(f"akshare 兜底：写入 {count} 条数据（{failed} 只未取到）")
+        logger.info(f"akshare：写入 {count} 条数据（{failed} 只未取到）")
         return count
 
     def _upsert_daily(self, df: pd.DataFrame) -> int:
@@ -435,7 +564,6 @@ class DataEngine:
                 index=False, method="multi", chunksize=500,
             )
             conn.commit()
-        return count
         return count
 
     def backfill(self, symbols: list[str]) -> None:
@@ -639,11 +767,27 @@ class DataEngine:
         finally:
             bs.logout()
 
-    def get_local_symbols(self) -> list[str]:
+    def get_local_symbols(self, latest_only: bool = True) -> list[str]:
+        """返回本地有行情数据的股票代码。
+
+        Args:
+            latest_only: 只返回**全库最新交易日**当天有行情的股票（默认）。
+
+                停牌、退市或某轮增量同步漏掉的票，其最后一行会早于大盘，
+                若拿它自己的「最后一天」当作「今日」，就是在用几天前的旧数据参与
+                当轮选股（实测库里有落后 25 天的票）。按最新交易日取行可以
+                自然过滤掉这些票 —— 停牌股当天本来就没有 K 线。
+
+                传 False 则返回库里出现过的全部代码（回填/排查用）。
+        """
         with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT symbol FROM stock_daily"
-            ).fetchall()
+            if latest_only:
+                rows = conn.execute(
+                    "SELECT DISTINCT symbol FROM stock_daily "
+                    "WHERE date = (SELECT MAX(date) FROM stock_daily)"
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT DISTINCT symbol FROM stock_daily").fetchall()
         return [row[0] for row in rows]
 
     # ── 股票名称 ──
@@ -713,4 +857,91 @@ class DataEngine:
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute("SELECT symbol, name FROM stock_name").fetchall()
         return {symbol: name for symbol, name in rows}
+
+    def name_coverage(self) -> float:
+        """stock_name 表对 stock_daily 中股票的覆盖率（0~1）。
+
+        用于决定是否需要刷新名称：名称表随数据库缓存持久化，
+        正常跑几轮后就是全的。覆盖率已经很高还去刷新，只会白白触发
+        baostock 登录（不可用时还会往 stdout 吐噪音）。
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            total = conn.execute(
+                "SELECT COUNT(DISTINCT symbol) FROM stock_daily"
+            ).fetchone()[0]
+            if not total:
+                return 1.0
+            named = conn.execute(
+                "SELECT COUNT(*) FROM stock_name "
+                "WHERE symbol IN (SELECT DISTINCT symbol FROM stock_daily)"
+            ).fetchone()[0]
+        return named / total
+
+    # ── 个股所属行业（推送里的「板块」）──
+
+    def get_boards(
+        self, symbols: list[str], ttl_days: int = _BOARD_TTL_DAYS
+    ) -> dict[str, str]:
+        """返回 {代码: 所属行业}，只包含查得到行业的股票。
+
+        优先读本地 `stock_board` 表（TTL 内命中即用），表里没有的**一次性批量**反查
+        并写回缓存。反查失败**不写库**，下一轮会自然重试。
+
+        北交所（4/8 开头）在东财 F10 里没有数据，直接跳过，省下无谓请求。
+
+        Args:
+            symbols: 股票代码列表，允许重复。
+            ttl_days: 缓存有效期（天）。
+
+        Returns:
+            {代码: 行业名}；查不到的股票不会出现在结果里
+            （推送侧按「无板块」处理）。
+        """
+        unique = list(dict.fromkeys(symbols))
+        if not unique:
+            return {}
+
+        cutoff = (date.today() - timedelta(days=ttl_days)).strftime("%Y-%m-%d")
+        placeholders = ",".join("?" * len(unique))
+
+        cached: dict[str, str] = {}
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"SELECT symbol, board FROM stock_board "
+                f"WHERE updated_at >= ? AND symbol IN ({placeholders})",
+                [cutoff, *unique],
+            ).fetchall()
+        for symbol, board in rows:
+            if board:
+                cached[symbol] = board
+
+        missing = [
+            s for s in unique
+            if s not in cached and not s.startswith(("4", "8"))
+        ]
+        if not missing:
+            return cached
+
+        logger.info(f"反查 {len(missing)} 只股票的所属行业...")
+        try:
+            fetched = _em_fetch_boards(missing)
+        except Exception as exc:  # noqa: BLE001 - 行业只是锦上添花，失败不影响推送
+            logger.warning(f"行业反查失败，本次推送不含板块：{exc}")
+            return cached
+
+        today = date.today().strftime("%Y-%m-%d")
+        if fetched:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.executemany(
+                    "INSERT INTO stock_board (symbol, board, updated_at) "
+                    "VALUES (?, ?, ?) "
+                    "ON CONFLICT(symbol) DO UPDATE SET "
+                    "board = excluded.board, updated_at = excluded.updated_at",
+                    [(s, b, today) for s, b in fetched.items()],
+                )
+                conn.commit()
+            cached.update(fetched)
+
+        logger.info(f"行业缓存命中 {len(cached)}/{len(unique)} 只")
+        return cached
 

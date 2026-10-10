@@ -5,6 +5,58 @@ from abc import ABC, abstractmethod
 from sequoia_x.core.config import Settings
 from sequoia_x.data.engine import DataEngine
 
+# ── 涨跌停幅度 ──
+#
+# A 股不同板块的日涨跌幅上限不一样，用同一个阈值判断「涨停/跌停」必然出错：
+# 拿 10% 的阈值去套创业板，一只「涨 12%」的普通票会被误判成「涨停」。
+# 下面按代码前缀区分（ST 股 ±5% 无法从代码判断，只能忽略）。
+_LIMIT_MAIN = 0.10  # 沪市 60x / 深市 000·001·002·003
+_LIMIT_20 = 0.20    # 创业板 300·301 / 科创板 688·689
+_LIMIT_30 = 0.30    # 北交所 4xx·8xx
+# 判定涨跌停时留的余量。交易所的涨跌停价是**四舍五入到分**的，
+# 低价股的比值会略低于名义幅度（如 3.33 → 3.66 只有 9.91%）。
+_LIMIT_TOL = 0.005
+
+
+def price_limit_pct(symbol: str) -> float:
+    """返回该代码所属板块的日涨跌幅上限（小数，0.10 表示 ±10%）。
+
+    规则：
+    - 创业板（300/301）、科创板（688/689）：±20%
+    - 北交所（4/8 开头）：±30%
+    - 其余（沪市 60x、深市 000/001/002/003）：±10%
+
+    Args:
+        symbol: 纯数字股票代码。
+
+    Returns:
+        涨跌幅上限，如 0.10。
+    """
+    if symbol.startswith(("300", "301", "688", "689")):
+        return _LIMIT_20
+    if symbol.startswith(("4", "8")):
+        return _LIMIT_30
+    return _LIMIT_MAIN
+
+
+def is_limit_up(symbol: str, close: float, prev_close: float) -> bool:
+    """按板块幅度判断「今日涨停」。
+
+    用**涨跌幅比例**而不是「等于涨停价」来判断：库里存的是后复权价，
+    绝对价格没有意义，但相邻两日的比值与真实涨跌幅一致
+    （除非当天正好除权除息，这是本方法的已知局限）。
+    """
+    if prev_close <= 0:
+        return False
+    return close >= prev_close * (1 + price_limit_pct(symbol) - _LIMIT_TOL)
+
+
+def is_limit_down(symbol: str, close: float, prev_close: float) -> bool:
+    """按板块幅度判断「今日跌停」（与 is_limit_up 对称）。"""
+    if prev_close <= 0:
+        return False
+    return close <= prev_close * (1 - price_limit_pct(symbol) + _LIMIT_TOL)
+
 
 class BaseStrategy(ABC):
     """选股策略抽象基类。
@@ -12,9 +64,9 @@ class BaseStrategy(ABC):
     所有具体策略必须继承此类并实现 run() 方法。
 
     Attributes:
-        webhook_key: 策略对应的飞书 webhook 标识，用于路由到不同机器人。
-            默认为 'default'，将使用 Settings.feishu_webhook_url。
-            子类可覆盖此属性以路由到专属机器人，例如 'ma_volume'。
+        webhook_key: 策略对应的推送路由标识，用于把不同策略的结果推到不同 token。
+            默认为 'default'，将使用全局 Settings.pushplus_token。
+            子类可覆盖此属性以路由到专属 token，例如 'ma_volume'。
     """
 
     webhook_key: str = "default"

@@ -3,7 +3,7 @@
 import pandas as pd
 
 from sequoia_x.core.logger import get_logger
-from sequoia_x.strategy.base import BaseStrategy
+from sequoia_x.strategy.base import BaseStrategy, is_limit_down
 
 logger = get_logger(__name__)
 
@@ -13,15 +13,18 @@ class UptrendLimitDownStrategy(BaseStrategy):
 
     选股条件（向量化，严禁 iterrows）：
     1. 处于上升趋势：昨日20日均线 > 昨日60日均线
-    2. 放量跌停：今日 close <= 昨日 close * 0.905
-                且今日 volume > 20日均量的 2.0 倍
+    2. 放量跌停：今日**跌停**（按板块幅度判定，见 `base.is_limit_down`）
+                且今日 volume > **前20日**（不含今日）均量的 2.0 倍
 
     Attributes:
-        webhook_key: 路由到 'limit_down' 专属飞书机器人。
+        webhook_key: 路由到 'limit_down' 专属推送 token。
     """
 
     webhook_key: str = "limit_down"
-    _MIN_BARS: int = 60  # 至少需要 60 根 K 线（60日均线）
+    # 需要 61 根而不是 60 根：趋势要比较「昨日」的 ma20/ma60，
+    # 昨日那一行也要有完整的 60 日窗口（否则 ma60 是 NaN，比较恒为 False）；
+    # 均量改用 shift(1).rolling(20) 后也要 61 根。
+    _MIN_BARS: int = 61
 
     def run(self) -> list[str]:
         """
@@ -42,7 +45,8 @@ class UptrendLimitDownStrategy(BaseStrategy):
                 # 向量化计算均线
                 df["ma20"] = df["close"].rolling(20).mean()
                 df["ma60"] = df["close"].rolling(60).mean()
-                df["vol_ma20"] = df["volume"].rolling(20).mean()
+                # shift(1) 把窗口推到「今日之前」，今日的量不参与自己的基准
+                df["vol_ma20"] = df["volume"].shift(1).rolling(20).mean()
 
                 prev = df.iloc[-2]  # 昨日
                 today = df.iloc[-1]  # 今日
@@ -53,7 +57,7 @@ class UptrendLimitDownStrategy(BaseStrategy):
                 # 条件 1：上升趋势（昨日均线多头排列）
                 uptrend = prev["ma20"] > prev["ma60"]
                 # 条件 2：放量跌停
-                limit_down = today["close"] <= prev["close"] * 0.905
+                limit_down = is_limit_down(symbol, today["close"], prev["close"])
                 volume_surge = today["volume"] > today["vol_ma20"] * 2.0
 
                 if uptrend and limit_down and volume_surge:

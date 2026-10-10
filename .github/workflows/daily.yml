@@ -1,15 +1,21 @@
 name: Sequoia-X 每日选股
 
 # ── 触发方式 ──────────────────────────────────────────────
-# 1) 定时：每周一至周五 11:15 UTC（= 北京时间 19:15，收盘后）
-# 2) 手动：Actions 页面点 "Run workflow"，可选是否跳过增量同步
+# 1) 定时：每周一至周五 10:30 UTC（= 北京时间 18:30，收盘后）
+#    ⚠️ GitHub 的 cron 一律按 UTC 计算，TZ 环境变量只影响进程内的 date.today()，
+#    不影响调度时刻。北京时间 18:30 = UTC 10:30。
+# 2) 手动：Actions 页面点 "Run workflow"，可选择数据更新方式
 on:
   schedule:
-    - cron: '15 11 * * 1-5'
+    - cron: '30 10 * * 1-5'
   workflow_dispatch:
     inputs:
+      prefer_akshare:
+        description: '用 akshare 更新数据（默认开；关掉则改试 baostock）'
+        type: boolean
+        default: true
       skip_sync:
-        description: '跳过 baostock 增量同步（接口不可达时用，只跑策略）'
+        description: '完全不更新数据，直接用库中现有数据跑策略'
         type: boolean
         default: false
 
@@ -41,9 +47,15 @@ jobs:
       STRATEGY_WEBHOOK_LIMIT_DOWN: ${{ secrets.STRATEGY_WEBHOOK_LIMIT_DOWN }}
       STRATEGY_WEBHOOK_RPS: ${{ secrets.STRATEGY_WEBHOOK_RPS }}
       STRATEGY_WEBHOOK_PRIVATE_PLACEMENT: ${{ secrets.STRATEGY_WEBHOOK_PRIVATE_PLACEMENT }}
-      # 手动触发时可勾选跳过增量同步；定时触发下该 input 为空字符串，
+      # 手动触发时可勾选跳过数据更新；定时触发下该 input 为空字符串，
       # 配置层会把空串按 False 处理（见 Settings._blank_bool_is_false）
       SKIP_SYNC: ${{ github.event.inputs.skip_sync }}
+      # 数据更新默认走 akshare（baostock 免费服务长期不稳定，先探路再兜底等于白等）。
+      # 手动触发时取勾选值；定时触发下 input 为空，回落到 'true'。
+      PREFER_AKSHARE: ${{ github.event.inputs.prefer_akshare || 'true' }}
+      # ── 冷启动种子（详见 data/seed/README.md）──
+      SEED_BARS: '400'                 # 降级补数时每只票保留的 K 线根数
+      SEED_FALLBACK_BACKFILL: 'true'   # 取不到 Release 种子时，是否降级为自行补数
 
     steps:
       - name: 检出代码
@@ -79,51 +91,98 @@ jobs:
           cache: 'pip'
           cache-dependency-path: pyproject.toml
 
-      # 数据库 117MB，超过 GitHub 单文件 100MB 限制且被 .gitignore 排除，
-      # 因此用滚动缓存持久化：restore-keys 命中最近一次，key 用 run_id 保证每轮都保存新副本。
-      # key 里带上种子文件的哈希：种子一更新（换了新版数据库）哈希就变，
-      # 旧缓存自动不再匹配 → 自动改用新种子重新引导，无需手工清理 Caches。
-      - name: 恢复数据库缓存
-        uses: actions/cache@v4
-        with:
-          path: data/sequoia_v2.db
-          key: sequoia-db-${{ hashFiles('data/seed/sequoia_v2.db.gz') }}-${{ github.run_id }}
-          restore-keys: |
-            sequoia-db-${{ hashFiles('data/seed/sequoia_v2.db.gz') }}-
-
-      # 缓存未命中时（首次运行 / 缓存被 GitHub 清理），从仓库内的 gzip 种子引导出初始数据库。
-      # 种子文件与生成方式见 data/seed/README.md
-      - name: 缓存未命中则从种子引导数据库
-        run: |
-          if [ -f data/sequoia_v2.db ]; then
-            echo "缓存已命中（$(du -h data/sequoia_v2.db | cut -f1)），跳过种子引导"
-            exit 0
-          fi
-          if [ ! -f data/seed/sequoia_v2.db.gz ]; then
-            echo "::error::缓存为空，且种子文件 data/seed/sequoia_v2.db.gz 不存在，无法初始化数据库。"
-            exit 1
-          fi
-          mkdir -p data
-          gunzip -c data/seed/sequoia_v2.db.gz > data/sequoia_v2.db
-          echo "已从种子引导数据库：$(du -h data/sequoia_v2.db | cut -f1)"
-
+      # 先装依赖再碰数据库：因为下面「取不到种子」时要降级到 `main.py --backfill`，
+      # 那条路径依赖 pandas 等包，装晚了就没法兜底。
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install akshare baostock "pydantic-settings>=2.0" python-dotenv rich pandas requests
 
-      # 已移除自动回填（回填接口数据仍有问题）。数据库来源 = 缓存 或 种子引导，
+      # 数据库 300MB+，远超 GitHub 单文件 100MB 限制，因此用滚动缓存持久化：
+      # restore-keys 命中最近一次，key 用 run_id 保证每轮都保存新副本。
+      #
+      # key 里带上 data/seed/VERSION 的哈希（而不是种子文件本身的哈希）：
+      # 种子放在 GitHub Release 里、平时并不在仓库内，hashFiles 取不到；
+      # 而 VERSION 里写着「当前种子对应哪个 Release tag」，发布新种子时它必变
+      # → 哈希变 → 旧缓存自动不再匹配 → 自动改用新种子重新引导，无需手工清 Caches。
+      - name: 恢复数据库缓存
+        uses: actions/cache@v4
+        with:
+          path: data/sequoia_v2.db
+          key: sequoia-db-${{ hashFiles('data/seed/VERSION') }}-${{ github.run_id }}
+          restore-keys: |
+            sequoia-db-${{ hashFiles('data/seed/VERSION') }}-
+
+      # 缓存未命中时（首次运行 / 缓存被 GitHub 清理），从 GitHub Release 下载种子引导初始数据库。
+      # 种子不进仓库：300MB+ 解压后太大，压缩后也到了 76MB，
+      # 进仓库会让每次 checkout 都白下载一遍。放 Release 资产则既不占体积、也不影响 clone。
+      # 种子内容与发布方式见 data/seed/README.md
+      - name: 缓存未命中则从 Release 下载种子
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f data/sequoia_v2.db ]; then
+            echo "缓存已命中（$(du -h data/sequoia_v2.db | cut -f1)），跳过种子引导"
+            exit 0
+          fi
+
+          TAG="$(tr -d '[:space:]' < data/seed/VERSION)"
+          if [ -z "$TAG" ]; then
+            echo "::error::data/seed/VERSION 为空，无法确定要下载哪个 Release 种子。"
+            exit 1
+          fi
+
+          echo "缓存未命中，从 Release '$TAG' 下载种子……"
+          mkdir -p data/seed data
+
+          # 下载 + 解压 + 校验串成一条 && 链：任一环失败都算「取不到种子」，
+          # 统一走下面的降级路径。写成 if 条件而不是裸命令，
+          # 是为了让失败不触发 bash -e 直接中断（那样子就没机会降级了）。
+          # 校验用单行 python -c：多行内容顶格会破坏 YAML block scalar 的缩进。
+          if gh release download "$TAG" \
+                 --repo "${GITHUB_REPOSITORY}" \
+                 --pattern 'sequoia_v2.db.gz' \
+                 --dir data/seed --clobber \
+             && gunzip -c data/seed/sequoia_v2.db.gz > data/sequoia_v2.db \
+             && python -c "import sqlite3,sys; n=sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0]; print(f'种子含 {n} 行行情'); sys.exit(0 if n > 0 else 1)"; then
+            echo "已从 Release '$TAG' 引导数据库：$(du -h data/sequoia_v2.db | cut -f1)"
+            rm -f data/seed/sequoia_v2.db.gz
+            exit 0
+          fi
+
+          # ── 降级：Release 取不到（或内容坏了）时自己补一个库，别让整轮白跑 ──
+          rm -f data/sequoia_v2.db data/seed/sequoia_v2.db.gz
+          echo "::warning::无法从 Release '$TAG' 取得可用种子。排查方向："
+          echo "::warning::  1) 该 tag 的 Release 是否已创建？见 ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases"
+          echo "::warning::  2) data/seed/VERSION 里的 tag 是否写错（当前值：$TAG）？"
+          echo "::warning::  3) 想重建种子：手动触发「Sequoia-X 发布数据库种子」工作流。"
+
+          if [ "${SEED_FALLBACK_BACKFILL}" != "true" ]; then
+            echo "::error::已关闭降级补数（SEED_FALLBACK_BACKFILL），终止。"
+            exit 1
+          fi
+
+          echo "降级：自行补数建立数据库（东财日K → 腾讯兜底）……"
+          if ! python main.py --backfill --bars "${SEED_BARS}"; then
+            echo "::error::降级补数也失败了。请手动触发「Sequoia-X 发布数据库种子」工作流建好 Release 后重跑。"
+            exit 1
+          fi
+          echo "降级补数完成：$(du -h data/sequoia_v2.db | cut -f1)"
+
+      # 已移除自动回填（回填接口数据仍有问题）。数据库来源 = 缓存 或 Release 种子，
       # 这里做最后一道兜底校验，避免"跑绿了但什么都没选出来"的假成功。
       - name: 检查数据库
         run: |
           if [ ! -f data/sequoia_v2.db ]; then
-            echo "::error::未找到 data/sequoia_v2.db：缓存恢复与种子引导均未产生数据库。"
+            echo "::error::未找到 data/sequoia_v2.db：缓存恢复与种子下载均未产生数据库。"
+            echo "  请确认 GitHub Release '$(tr -d '[:space:]' < data/seed/VERSION)' 里存在 sequoia_v2.db.gz 资产。"
+            echo "  见 https://github.com/${GITHUB_REPOSITORY}/releases"
             exit 1
           fi
           ROWS=$(python -c "import sqlite3;print(sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0])" 2>/dev/null || echo 0)
           echo "数据库现有 $ROWS 行"
           if [ "$ROWS" = "0" ]; then
-            echo "::error::数据库为空，无法执行增量选股。请检查 data/seed/sequoia_v2.db.gz。"
+            echo "::error::数据库为空，无法执行增量选股。请检查 Release 里的种子资产是否损坏。"
             exit 1
           fi
 

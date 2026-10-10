@@ -1,29 +1,143 @@
 # 数据库种子 | DB Seed
 
-`sequoia_v2.db.gz` —— 用于给 GitHub Actions 引导初始数据库的压缩快照。
+Actions 冷启动用的数据库快照。**压缩包不放仓库，放在 GitHub Release。**
+
+`data/seed/` 里只跟踪两个小文件：
+
+| 文件 | 作用 |
+|---|---|
+| `VERSION` | 当前种子对应哪个 Release tag，例如 `seed-2026-10-09`。内容的哈希参与 daily 的缓存 key |
+| `README.md` | 本文件 |
+
+`sequoia_v2.db.gz` 已被 `.gitignore` 排除。
 
 ## 为什么需要它
 
-`data/sequoia_v2.db` 有 100MB+，超过 GitHub 单文件 100MB 限制，且被 `.gitignore` 排除，
-所以数据库本身不入库。Actions 上的数据靠 `actions/cache` 滚动缓存持久化，
-但**缓存是空的、只能由运行环境自己产生**，冷启动时没有任何数据。
+`data/sequoia_v2.db` 解压后 300MB+，压缩后也有 ~76MB：
 
-工作流已移除自动回填（baostock 回填接口数据仍有问题），因此改用这个种子文件做冷启动：
-缓存未命中时自动 `gunzip` 出 `data/sequoia_v2.db`，之后正常运行增量更新并写回缓存。
+- 超过 GitHub 单文件 100MB **硬限制**（推送会被直接拒绝）；
+- 超过 50MB 后每次 `git push` 都会收到大文件警告；
+- 更关键的是，**仓库里的大文件会让每一次 `actions/checkout` 都跟着下载它** ——
+  即使当天缓存命中、根本用不到种子，克隆成本照样付。
+
+所以数据库本身不入库。Actions 上的数据靠两级方案持久化：
+
+1. **滚动缓存**（正常路径）：`actions/cache` 恢复最近一次，跑完再存一份新副本。
+2. **Release 种子**（冷启动）：缓存未命中时，从 Release 下载 gz 解压成初始数据库。
+
+放 Release 的好处：不占仓库体积、不影响 clone 速度、单文件上限 2GB
+（Release 资产下载走 GitHub CDN，公开仓库**匿名可下**，不需要额外权限）。
+
+## 冷启动链路
+
+```
+仓库缓存未命中
+   ↓
+读 data/seed/VERSION  →  tag = seed-2026-10-09
+   ↓
+gh release download seed-2026-10-09 --pattern 'sequoia_v2.db.gz' --dir data/seed
+   ↓
+gunzip → data/sequoia_v2.db
+   ↓
+正常跑增量更新，跑完写回缓存
+```
+
+**缓存 key 里带的是 `VERSION` 文件的哈希，不是种子文件本身的哈希。**
+因为种子平时并不在仓库里，`hashFiles('data/seed/sequoia_v2.db.gz')` 会取到空值。
+`VERSION` 的内容一变（= 换了新种子的 tag），哈希就变 → 旧缓存自动不再匹配
+→ 下一轮自动下载新种子重新引导。**不需要手工去 Actions → Caches 删缓存。**
+
+## 如何发布 / 更新种子
+
+### 方式一：手动触发工作流（推荐）
+
+仓库 **Actions → 「Sequoia-X 发布数据库种子」→ Run workflow**，填三个参数：
+
+| 参数 | 说明 |
+|---|---|
+| `tag` | 留空 = 用 `data/seed/VERSION` 的当前值（即**覆盖重发**，不影响既有缓存） |
+| `bars` | 每只票保留最近多少根 K 线，默认 `400`。越小种子越小；`0` = 不裁剪 |
+| `backfill_if_empty` | 缓存为空时是否自动补数（默认开） |
+
+工作流会：恢复最近一次数据库缓存 →（必要时补数）→ 裁剪 + VACUUM + gzip →
+`gh release create/upload` → 若换了新 tag 则更新 `VERSION` 并提交。
+
+**想让新缓存从更新的数据冷启动，就换一个新 tag**（如 `seed-2026-11-01`）。
+
+### 方式二：本机生成 + 网页上传
+
+```bash
+# 1) 本机数据库补齐后，打包（自动裁剪 + VACUUM + gzip -9）
+python scripts/pack_seed.py --bars 400
+# 复制 data\sequoia_v2.db（301.0 MB）→ 临时目录
+# 原始：2,405,832 行 / 5,224 只 / 2024-01-02 ~ 2026-10-09 / 名称 5,561 条
+# 裁剪：每只保留最近 400 根 → 删除 344,497 行，剩 2,061,335 行
+# 完成：data/seed/sequoia_v2.db.gz
+#   75.9 MB（源库 301.0 MB → VACUUM 后 250.7 MB，相对 VACUUM 后压缩率 3.30x，
+#            sha256 a3c0ab163cc09f0c…）
+
+# 2) 到 GitHub → Releases → Draft a new release
+#    tag 例如 seed-2026-10-09，把 data/seed/sequoia_v2.db.gz 拖进去发布
+
+# 3) 换了新 tag 的话，把 data/seed/VERSION 也改成同一个 tag 再提交
+```
+
+`pack_seed.py` 会打印 `SEED_SHA256` / `SEED_BYTES` / `SEED_ROWS` 等，方便回填 Release 说明。
+gzip 头的 mtime 被固定为 0，所以**同一个数据库打出来的 sha256 永远一致**，可复现。
+
+## 如何补齐本机数据
+
+```bash
+# 把库里「一行都没有」的股票一次灌满（东财优先、腾讯兜底，不依赖 baostock）
+python main.py --backfill
+
+# 控制每只票保留的根数（默认 400；根数越少种子越小）
+python main.py --backfill --bars 300
+
+# 先小批试跑
+python main.py --backfill --limit 100
+```
+
+补数可中断续跑：Ctrl+C 后重跑会自动跳过已完成的股票。
+只处理库里完全没有数据的股票 —— 已有数据的由日常增量通道续写，
+避免两条通道的复权基准在同一条价格序列上打架。
 
 ## 当前种子内容
 
 | 项 | 值 |
 |---|---|
-| 覆盖股票 | **1332 只**（全市场约 5200 只） |
+| tag | `seed-2026-10-09` |
+| 覆盖股票 | **5224 只**（全市场 A 股，剔除北交所） |
 | 日期范围 | 2024-01-02 ~ 2026-10-09 |
-| 行情行数 | 871,492 |
-| 股票名称 | 5,561 条（全市场，见 `stock_name` 表） |
-| 解压后大小 | 106.7 MB |
-| 压缩后大小 | 35.5 MB（gzip -9，压缩率 3.0x） |
+| 行情行数 | 2,061,335（每只截断到最近 400 根） |
+| 股票名称 | 5,561 条（含已退市代码；见 `stock_name` 表） |
+| 压缩后大小 | 75.9 MB（gzip -9） |
+| VACUUM 后大小 | 250.7 MB |
+| sha256 | `a3c0ab163cc09f0c3e1dbede5258321798e322eda5abf8de20833d50bd2d99df` |
 
-> ⚠️ 行情只覆盖约 1/4 的市场，策略每天只会扫描这 1332 只。
-> 想覆盖全市场，需要先在本机把历史数据补齐，再重新生成种子。
+各板块覆盖（按代码数）：
+
+| 板块 | 只数 | 数据来源 |
+|---|---|---|
+| 沪市主板（600/601/603/605） | 1702 | baostock（后复权） |
+| 深市主板（000/001/002/003） | 1495 | 腾讯（前复权） |
+| 创业板（300/301） | 1408 | 腾讯（前复权） |
+| 科创板（688/689） | 618 | 腾讯（前复权） |
+
+> ⚠️ 北交所在东财与腾讯的日K接口里都拿不到数据，已被排除；`get_boards` 同样会跳过它。
+>
+> ⚠️ 两条通道的**复权基准不同**（baostock 后复权 vs 腾讯前复权）。同一段日期窗口内
+> 两者只差一个常数因子，日涨跌幅、均线交叉、突破判定等全部是比值运算，完全等价；
+> 唯一的绝对值比较是 `turtle` 的成交额门槛，与价格基准无关。**同一只股票不会跨源拼接**
+> （补数只补库里没有的票，已有数据的由增量通道用锚点换算续写）。
+
+### 为什么裁剪到 400 根
+
+日常增量同步**只追加、不裁剪**，靠每天新增一行让库慢慢变大
+（5224 只 × 每交易日 1 行 ≈ 一年 100MB）。种子必须封顶，否则每发一次都会更大。
+
+400 根是策略的下限需求：`turtle` 取 400 日新高、`rps_breakout` 需要约 250 日，
+再往下砍会影响选股结果。裁剪在 VACUUM **之前**做，空间才能真正回收。
 
 ### 关于 `stock_name` 表
 
@@ -36,36 +150,10 @@
 
 每次运行 `main.py` 会尝试刷新一次（单次请求拉全市场，约 30s），失败只告警不中断。
 
-## 如何重新生成种子
-
-在本机数据库补齐后，重新压一份覆盖上去：
-
-```bash
-python - <<'PY'
-import sqlite3, os, gzip, shutil
-
-db = "data/sequoia_v2.db"
-# 1) 复制一份再 VACUUM，避免动到正在使用的库
-tmp = "data/seed/.vacuum.db"
-shutil.copyfile(db, tmp)
-sqlite3.connect(tmp).execute("VACUUM")
-
-# 2) gzip -9 压缩
-with open(tmp, "rb") as fi, gzip.open("data/seed/sequoia_v2.db.gz", "wb", compresslevel=9) as fo:
-    shutil.copyfileobj(fi, fo, length=1024 * 1024)
-
-os.remove(tmp)
-print("压缩后:", round(os.path.getsize("data/seed/sequoia_v2.db.gz") / 1024 / 1024, 1), "MB")
-PY
-```
-
-然后提交 `data/seed/sequoia_v2.db.gz` 即可。
-
-工作流的缓存 key 里带了这个种子文件的哈希，所以**种子一换，旧缓存自动不再匹配**，
-下一轮会自动用新种子重新引导，不需要手工去 Actions → Caches 删缓存。
-
 ## 注意
 
 - 种子是**冷启动兜底**，正常运行路径是缓存，不会每轮读它。
-- `actions/cache` 连续 7 天未被访问会被 GitHub 清理，届时会自动回退到种子重新引导。
+- `actions/cache` 连续 7 天未被访问会被 GitHub 清理，届时会自动回退到 Release 种子重新引导。
+- **Release 里那个 tag 的资产不能删** —— 删了之后一旦缓存被回收，daily 就没法冷启动了
+  （届时会在「检查数据库」步骤报错，并提示去哪个 URL 排查）。
 - 种子日期越旧，冷启动时需要的增量拉取区间越长；建议定期更新。

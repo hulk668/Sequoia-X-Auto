@@ -19,6 +19,11 @@ ENV/
 # 数据库文件
 data/*.db
 
+# 数据库种子（压缩包放 GitHub Release，不入库；见 data/seed/README.md）
+# 只跟踪 data/seed/VERSION 与 README.md
+data/seed/*.db.gz
+data/seed/*.db
+
 # 环境变量
 .env
 

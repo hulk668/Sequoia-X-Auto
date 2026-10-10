@@ -14,62 +14,27 @@ class TurtleTradeStrategy(BaseStrategy):
     选股条件（向量化，严禁 iterrows）：
     1. 突破新高：今日 close > 前20个交易日 high 的最大值
     2. 流动性：今日 turnover > 100,000,000
-    3. 防诱多过滤：今日必须是实体阳线（今日 close > 今日 open），且必须真涨（今日 close > 昨日 close）
+    3. 防诱多过滤：今日必须是实体阳线（今日 close > 今日 open），
+       且必须真涨（今日 close > 昨日 close）
+
+    结果按**当日成交额**从大到小排序，活跃的排前面。
 
     Attributes:
-        webhook_key: 路由到 'turtle' 专属飞书机器人。
+        webhook_key: 路由到 'turtle' 专属推送 token。
     """
 
     webhook_key: str = "turtle"
     _MIN_BARS: int = 21  # 至少需要 21 根 K 线（20日窗口 + 当日）
-
-    def _get_market_caps(self, symbols: list[str]) -> dict[str, float]:
-        """通过 baostock 查询候选股票的流通市值（不复权收盘价 × 流通股本）。
-
-        流通股本 = 成交量 / (换手率% / 100)
-        流通市值 = 流通股本 × 不复权收盘价
-        """
-        from datetime import date
-
-        import baostock as bs
-
-        today_str = date.today().strftime("%Y-%m-%d")
-        market_caps: dict[str, float] = {}
-
-        bs.login()
-        try:
-            for symbol in symbols:
-                bs_code = self.engine._to_baostock_code(symbol)
-                rs = bs.query_history_k_data_plus(
-                    bs_code,
-                    "close,volume,turn",
-                    start_date=today_str,
-                    end_date=today_str,
-                    frequency="d",
-                    adjustflag="3",  # 不复权，真实价格
-                )
-                while rs.next():
-                    row = rs.get_row_data()
-                    try:
-                        close = float(row[0])
-                        volume = float(row[1])
-                        turn = float(row[2])
-                        if turn > 0:
-                            circulating_shares = volume / (turn / 100)
-                            market_caps[symbol] = circulating_shares * close
-                    except (ValueError, ZeroDivisionError):
-                        continue
-        finally:
-            bs.logout()
-
-        return market_caps
+    # 流动性门槛：当日成交额过亿
+    _MIN_TURNOVER: float = 100_000_000
 
     def run(self) -> list[str]:
-        """
-        遍历全市场，返回满足海龟突破条件的股票代码列表。
-        """
+        """遍历全市场，返回满足海龟突破条件的股票代码列表（按成交额降序）。"""
         symbols = self.engine.get_local_symbols()
-        candidates: list[str] = []
+        # (代码, 当日成交额)。排序只用库里的数据 —— 不再为了排序去连 baostock：
+        # 免费服务不稳定，为「排序」这种锦上添花的事拖垮整轮不值得，
+        # 而且外部接口取的是 date.today()，和策略判定所用的库内最后交易日可能对不上。
+        candidates: list[tuple[str, float]] = []
 
         for symbol in symbols:
             try:
@@ -89,23 +54,22 @@ class TurtleTradeStrategy(BaseStrategy):
                 # 核心条件 1：突破前 20 天最高点
                 breakout = last["close"] > last["high_20"]
                 # 核心条件 2：流动性过亿
-                liquid = last["turnover"] > 100_000_000
+                liquid = last["turnover"] > self._MIN_TURNOVER
 
-                # 【新增防守条件】拒绝郑州煤电式的高开低走大阴线！
+                # 【防守条件】拒绝郑州煤电式的高开低走大阴线
                 is_yang = last["close"] > last["open"]   # 实体必须是阳线（红柱）
                 is_up = last["close"] > prev["close"]    # 必须是真涨，不能是假阳线
 
                 if breakout and liquid and is_yang and is_up:
-                    candidates.append(symbol)
+                    candidates.append((symbol, float(last["turnover"])))
 
             except Exception as exc:
                 logger.warning(f"[{symbol}] TurtleTradeStrategy 计算失败：{exc}")
                 continue
 
-        # 按流通市值从大到小排序
-        if candidates:
-            market_caps = self._get_market_caps(candidates)
-            candidates.sort(key=lambda s: market_caps.get(s, 0), reverse=True)
+        # 成交额越大越值得先看。sort 是稳定的，成交额相同则保持原顺序。
+        candidates.sort(key=lambda kv: kv[1], reverse=True)
+        result = [symbol for symbol, _ in candidates]
 
-        logger.info(f"TurtleTradeStrategy 选出 {len(candidates)} 只股票")
-        return candidates
+        logger.info(f"TurtleTradeStrategy 选出 {len(result)} 只股票")
+        return result
