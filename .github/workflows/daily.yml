@@ -49,6 +49,19 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # 防止把真实 token 误提交进仓库（仓库是公开的）。
+      # PushPlus 的 token 是 32 位十六进制串，正常代码/文档里不应出现这种形态；
+      # \b 边界保证不会误伤 uv.lock 里 64 位的 sha256。
+      - name: 检查是否误提交密钥
+        run: |
+          hits=$(git grep -nIE '\b[0-9a-fA-F]{32}\b' -- . ':(exclude)data/seed' || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::检测到疑似 token 被提交进仓库。请立即把该值改为占位符，并到对应平台重置这个 token。"
+            exit 1
+          fi
+          echo "未发现疑似密钥 ✓"
+
       # 最先校验推送 Token：未配置的 Secret 会以"空字符串"形式注入，
       # 不拦的话要等跑完全部策略、在推送阶段才会失败，白费几分钟。
       - name: 校验推送 Token
