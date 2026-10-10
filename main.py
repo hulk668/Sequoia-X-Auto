@@ -26,7 +26,7 @@ from sequoia_x.core.config import get_settings
 from sequoia_x.core.logger import get_logger
 from sequoia_x.data.backfill import MarketBackfiller, load_symbols
 from sequoia_x.data.engine import DataEngine
-from sequoia_x.notify.pushplus import PushPlusNotifier
+from sequoia_x.notify import build_notifier
 from sequoia_x.strategy.base import BaseStrategy
 from sequoia_x.strategy.high_tight_flag import HighTightFlagStrategy
 from sequoia_x.strategy.limit_up_shakeout import LimitUpShakeoutStrategy
@@ -165,7 +165,8 @@ def main() -> None:
             PrivatePlacementStrategy(engine=engine, settings=settings),
         ]
 
-        notifier = PushPlusNotifier(settings)
+        # 通知渠道由配置决定（notify_channel）：邮件 / PushPlus / 两者
+        notifier = build_notifier(settings)
 
         # 5. 先把所有策略跑完并汇总，最后统一推送（不逐个策略单独发消息）
         results: dict[str, tuple[list[str], str]] = {}

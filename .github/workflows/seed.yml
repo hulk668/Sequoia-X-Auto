@@ -57,9 +57,10 @@ jobs:
       TZ: Asia/Shanghai
       DB_PATH: data/sequoia_v2.db
       START_DATE: '2024-01-01'
-      # 本工作流不推送，但 Settings 里 pushplus_token 是必填字段，
-      # 缺了会在 get_settings() 直接抛 ValidationError。给个占位值即可。
-      PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN || 'seed-workflow-no-push' }}
+      # 本工作流只打包数据库、不发任何通知。
+      # 早年 Settings 要求必须有通知凭据（pushplus_token 必填），所以这里塞占位 token；
+      # 现在改用 NOTIFY_CHANNEL=none 明确声明「不通知」，通道校验直接放行，不必再塞占位值。
+      NOTIFY_CHANNEL: 'none'
       # 全市场股票池下限。低于它说明池子残缺（例如只剩沪市主板 1332 只），
       # 打包前必须先补齐 —— 否则会把残缺的库当成"可用种子"发出去。
       MIN_SYMBOLS: '4000'

@@ -20,9 +20,37 @@ db_path = "data/sequoia_v2.db"
 # 历史数据起始日期（默认：2024-01-01）
 start_date = "2024-01-01"
 
-# PushPlus Token（必填）
+# ── 通知渠道 ────────────────────────────────────────────────
+# auto（默认）  邮件参数配全了就用邮件，否则回落 PushPlus
+# email         只发邮件
+# pushplus      只发 PushPlus
+# both          两个都发
+# none          不发通知（只跑数据时用）
+notify_channel = "auto"
+
+# ── 邮件（推荐通道）─────────────────────────────────────────
+# 为什么改用邮件：PushPlus 正文有 **2 万字上限**，股票池补齐全市场（5000+ 只）
+# 之后很容易超限，服务端直接报 code 999「发送内容过大」。邮件没这个限制，
+# 而且能排版成带样式的 HTML。
+#
+# ⚠️ smtp_password 在多数邮箱要填「客户端授权码」，不是登录密码：
+#     QQ 邮箱    smtp.qq.com        465(SSL)  设置→账户→开启SMTP→生成授权码
+#     163 邮箱   smtp.163.com       465(SSL)  设置→POP3/SMTP/IMAP→开启→授权码
+#     Gmail     smtp.gmail.com     587(STARTTLS)  需「应用专用密码」
+#     钉钉企业邮箱 smtp.em.dingtalk.com  465(SSL)  需管理员开通第三方客户端
+#     （钉钉个人邮箱 @dingtalk.com 可能不允许第三方客户端发信，届时改用其他邮箱即可）
+smtp_host = "smtp.qq.com"
+smtp_port = 465
+smtp_user = "you@qq.com"
+smtp_password = "your-smtp-auth-code"
+mail_from = ""                              # 留空则用 smtp_user
+mail_from_name = "Sequoia-X 选股"
+mail_to = "your-mail@example.com"           # 收件人，多个用逗号分隔
+
+# ── PushPlus（可选，仅作备用渠道）───────────────────────────
 # 获取地址：https://www.pushplus.plus/push1.html
-pushplus_token = "your-pushplus-token-here"
+# 只有在 notify_channel = "pushplus" / "both"，或 auto 且邮件未配全时才会用到。
+pushplus_token = ""
 
 # 数据更新通道：是否直接使用 akshare（默认 false）
 # 推荐设成 true —— baostock 免费服务长期不稳定，"先探测再回退"每轮都要白等一次探测

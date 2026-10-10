@@ -40,14 +40,23 @@ pip install akshare baostock "pydantic-settings>=2.0" python-dotenv rich pandas 
 cp config.example.toml config.local.toml
 ```
 
-然后编辑 `config.local.toml`，至少要填 `pushplus_token`：
+然后编辑 `config.local.toml`，配好**邮件通知**（推荐）即可：
 
 ```toml
 db_path = "data/sequoia_v2.db"
 start_date = "2024-01-01"
 
-# 必填：https://www.pushplus.plus/push1.html
-pushplus_token = "你的token"
+# 通知渠道：auto = 配了邮件就用邮件，否则回落 PushPlus
+notify_channel = "auto"
+
+# ── 邮件（推荐）──
+# ⚠️ smtp_password 多数邮箱要填「客户端授权码」，不是登录密码
+smtp_host = "smtp.qq.com"          # 163 用 smtp.163.com；钉钉企业邮箱 smtp.em.dingtalk.com
+smtp_port = 465
+smtp_user = "you@qq.com"
+smtp_password = "你的授权码"
+mail_from = ""                     # 留空则用 smtp_user
+mail_to = "收件人@example.com"      # 多个用逗号分隔
 
 # 数据更新直接走 akshare，不探测 baostock（推荐：baostock 免费服务不稳定）
 prefer_akshare = true
@@ -59,6 +68,11 @@ skip_sync = false
 enable_akshare_fallback = true
 ```
 
+> **为什么默认走邮件**：PushPlus 正文有 **2 万字上限**，股票池补齐全市场（5000+ 只）
+> 之后很容易超限，服务端直接报 `code 999 发送内容过大`。邮件没有这个限制，
+> 而且收到的是带样式的 HTML 版。想继续用 PushPlus 就把 `notify_channel` 设成
+> `pushplus`（或 `both`）并填好 `pushplus_token`。
+
 **`config.local.toml` 已加入 `.gitignore`，不会被提交**，可以放心写真实 token。
 
 <details>
@@ -69,7 +83,13 @@ enable_akshare_fallback = true
 也就是说你仍可以用 `.env`（`cp .env.example .env`），或者临时用环境变量覆盖：
 
 ```bash
-PUSHPLUS_TOKEN=xxx python main.py
+SMTP_PASSWORD=你的授权码 MAIL_TO=收件人@example.com python main.py
+```
+
+也可以临时切回 PushPlus：
+
+```bash
+PUSHPLUS_TOKEN=xxx NOTIFY_CHANNEL=pushplus python main.py
 ```
 
 给某个策略单独配推送 token，在 `config.local.toml` 里加：
@@ -214,8 +234,17 @@ PushPlus 推送成功 [MaVolumeStrategy + TurtleTradeStrategy + ...]
 
 ## 6. 常见问题
 
-**Q：提示 `PUSHPLUS_TOKEN 为空`？**
-`config.local.toml` 里的 `pushplus_token` 没填，或者填成了空字符串。
+**Q：提示「未配置任何通知通道」？**
+`config.local.toml` 里既没配全邮件参数（`smtp_host` / `smtp_user` /
+`smtp_password` / `mail_to` 缺一不可），也没有 `pushplus_token`。配其中一组即可。
+
+**Q：邮件发不出去，日志说「SMTP 认证被拒」？**
+多半是把邮箱**登录密码**填进了 `smtp_password`。QQ / 163 / 钉钉企业邮箱等
+都需要单独生成「客户端授权码」，并且要先在邮箱设置里**开启 SMTP 服务**。
+
+**Q：想继续用 PushPlus，但它报 `code 999 发送内容过大`？**
+PushPlus 正文上限 2 万字，股票池补齐全市场后容易触顶。改用邮件
+（`notify_channel = "email"`）即可绕开 —— 邮件没有字数限制。
 
 **Q：推送里日期带 `⚠️ 数据截止 ...`？**
 说明本次没抓到新数据（通常是交易日还没收盘，或数据源不通）。

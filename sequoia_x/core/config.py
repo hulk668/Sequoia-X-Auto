@@ -14,7 +14,7 @@
 from pathlib import Path
 from typing import Any
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -59,8 +59,32 @@ class _LocalConfigSource(PydanticBaseSettingsSource):
 class Settings(BaseSettings):
     db_path: str = "data/sequoia_v2.db"
     start_date: str = "2024-01-01"
-    pushplus_token: str  # 必填字段，缺失或为空时抛出 ValidationError
+
+    # ── 通知通道 ──
+    # auto    配了邮件参数就用邮件，否则回落 PushPlus（默认）
+    # email   强制只发邮件
+    # pushplus 强制只发 PushPlus
+    # both    两边都发
+    # none    不发通知（只跑数据的工作流用，跳过通道校验）
+    notify_channel: str = "auto"
+
+    # ── PushPlus（已改为可选）──
+    # 历史上这里是必填；正文超过 2 万字会被服务端拒绝（code 999），
+    # 全市场股票池补齐后很容易触顶，因此新增了邮件通道并把它降级为可选。
+    pushplus_token: str = ""
     strategy_webhooks: dict[str, str] = {}
+
+    # ── 邮件 / SMTP ──
+    # 465 走隐式 SSL，其余端口按 STARTTLS 升级
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_user: str = ""
+    # 注意：多数邮箱这里要填「客户端授权码」而不是登录密码
+    smtp_password: str = ""
+    mail_from: str = ""  # 留空则用 smtp_user
+    mail_from_name: str = "Sequoia-X 选股"
+    # 收件人，多个用逗号分隔（中英文逗号、分号都能识别）
+    mail_to: str = ""
     # 仅做策略选股、跳过所有数据抓取（baostock 与 akshare 都不跑）
     skip_sync: bool = False
     # 直接指定用 akshare 更新增量数据，不探测 baostock。
@@ -89,24 +113,74 @@ class Settings(BaseSettings):
             return False
         return v
 
-    @field_validator("pushplus_token")
-    @classmethod
-    def _pushplus_token_not_blank(cls, v: str) -> str:
-        """拒绝空 token。
+    @model_validator(mode="after")
+    def _validate_channels(self) -> "Settings":
+        """校验通知通道配置是否自洽。
 
-        只声明 `pushplus_token: str` 只能拦住"字段完全缺失"的情况；
-        如果环境变量存在但值是空字符串（CI 中未配置的 Secret 正是如此），
-        空串对 str 类型依然合法，会一路带到推送阶段才以
-        PushPlus 的 "token不能为空" 失败。这里提前拦掉，快速报错。
+        历史上 pushplus_token 是**必填**字段。改成邮件通道后换成
+        「至少有一个可用通道」：单一通道模式强制对应参数齐全，auto 模式两者取其一。
+        这样既不会出现「配好了邮件却因为没填 PushPlus token 起不来」，
+        也不会出现「什么都没配、一路跑到推送阶段才报错」。
         """
-        if not v or not v.strip():
+        channel = (self.notify_channel or "auto").strip().lower()
+        object.__setattr__(self, "notify_channel", channel)
+
+        allowed = {"auto", "email", "pushplus", "both", "none"}
+        if channel not in allowed:
             raise ValueError(
-                "PUSHPLUS_TOKEN 为空。本地请在 config.local.toml 中填写 pushplus_token"
-                "（可从 config.example.toml 复制），或设置环境变量 PUSHPLUS_TOKEN；"
-                "GitHub Actions 上需在仓库 Settings → Secrets and variables → Actions "
-                "中配置名为 PUSHPLUS_TOKEN 的 repository secret。"
+                f"notify_channel 取值非法：{channel!r}。可选 {' / '.join(sorted(allowed))}。"
             )
-        return v.strip()
+        if channel == "none":
+            return self  # 明确表示不发通知，跳过校验
+
+        has_mail = self._has_mail_config()
+        has_push = bool(self.pushplus_token and self.pushplus_token.strip())
+
+        if channel == "email" and not has_mail:
+            raise ValueError(
+                "notify_channel=email，但邮件参数不全。请设置 SMTP_HOST / SMTP_USER / "
+                "SMTP_PASSWORD / MAIL_TO（本地写在 config.local.toml，CI 上配成 repository secret）。"
+            )
+        if channel == "pushplus" and not has_push:
+            raise ValueError("notify_channel=pushplus，但 PUSHPLUS_TOKEN 为空。")
+        if channel == "both" and not (has_mail and has_push):
+            raise ValueError("notify_channel=both，需要同时配好邮件参数与 PUSHPLUS_TOKEN。")
+        if channel == "auto" and not (has_mail or has_push):
+            raise ValueError(
+                "未配置任何通知通道。请在 config.local.toml（或环境变量）中设置邮件参数"
+                " SMTP_HOST / SMTP_USER / SMTP_PASSWORD / MAIL_TO，或设置 PUSHPLUS_TOKEN。"
+                "详见 RUNNING.md。"
+            )
+        return self
+
+    def _has_mail_config(self) -> bool:
+        """邮件通道所需参数是否齐全（mail_from 缺省时会回落到 smtp_user）。"""
+        return all(
+            str(v).strip()
+            for v in (self.smtp_host, self.smtp_user, self.smtp_password, self.mail_to)
+        )
+
+    def effective_channels(self) -> list[str]:
+        """实际要使用的通知渠道列表。
+
+        Returns:
+            `["email"]` / `["pushplus"]` / `["email", "pushplus"]` / `[]`
+        """
+        channel = (self.notify_channel or "auto").strip().lower()
+        if channel == "none":
+            return []
+        if channel == "email":
+            return ["email"]
+        if channel == "pushplus":
+            return ["pushplus"]
+        if channel == "both":
+            return ["email", "pushplus"]
+        # auto：优先邮件（没有字数上限、排版更好），没有才回落 PushPlus
+        if self._has_mail_config():
+            return ["email"]
+        if self.pushplus_token and self.pushplus_token.strip():
+            return ["pushplus"]
+        return []
 
     @classmethod
     def settings_customise_sources(
@@ -157,13 +231,15 @@ def get_settings() -> Settings:
     """返回全局 Settings 单例。
 
     首次调用时按「环境变量 > config.local.toml > .env > 默认值」的顺序加载配置。
-    若必填字段（pushplus_token）缺失或为空，抛出 pydantic_core.ValidationError。
+    若没有任何可用的通知通道（邮件参数不全、同时也没有 PUSHPLUS_TOKEN），
+    抛出 pydantic_core.ValidationError —— 与其跑完全部策略才在推送阶段失败，
+    不如一开始就说清楚缺什么。
 
     Returns:
         Settings: 全局唯一的配置实例。
 
     Raises:
-        pydantic_core.ValidationError: 当必填字段缺失或字段类型不匹配时抛出。
+        pydantic_core.ValidationError: 通知通道配置缺失或字段类型不匹配时抛出。
     """
     global _settings
     if _settings is None:

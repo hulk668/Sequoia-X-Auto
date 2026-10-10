@@ -7,7 +7,7 @@
 ## 简介 | Introduction
 
 Sequoia-X V2 是面向 A 股市场的量化选股系统，基于现代 Python 工程化标准从零重构。
-系统以 OOP 架构、向量化计算和增量数据更新为核心设计原则，每日收盘后自动选股并推送至 PushPlus。
+系统以 OOP 架构、向量化计算和增量数据更新为核心设计原则，每日收盘后自动选股并推送（默认邮件，可选 PushPlus）。
 
 数据层支持两条通道：[baostock](http://baostock.com)（免费、无需注册）与 akshare（东方财富源）。
 两者的复权基准不同（见「数据更新」一节），跨源取数一律通过「锚点 + 比例换算」对齐到库中的后复权序列。
@@ -19,7 +19,7 @@ Sequoia-X V2 是面向 A 股市场的量化选股系统，基于现代 Python �
 ## 运行模式
 
 ```bash
-python main.py                    # 日常模式：增量补数据 + 跑完所有策略 + 汇总后一次性 PushPlus 推送
+python main.py                    # 日常模式：增量补数据 + 跑完所有策略 + 汇总后一次性邮件推送
 python main.py --prefer-akshare   # 同上，但数据更新直接走 akshare（不探测 baostock）
 python main.py --skip-sync        # 完全不更新数据，直接用库中现有数据选股
 python main.py --backfill         # 补数模式：把库里没有的股票一次灌满（可中断续跑）
@@ -77,7 +77,7 @@ pip install akshare baostock "pydantic-settings>=2.0" python-dotenv rich pandas 
 
 ```bash
 cp config.example.toml config.local.toml
-# 编辑 config.local.toml，填入 pushplus_token
+# 编辑 config.local.toml，填入 SMTP 邮件参数（见 RUNNING.md）
 ```
 
 `config.local.toml` 已加入 `.gitignore`，不会被提交。也支持传统的 `.env`（见 `.env.example`）。
@@ -126,9 +126,23 @@ python main.py
 
 仓库 → **Settings → Secrets and variables → Actions → New repository secret**：
 
+**邮件通知（推荐通道）**：
+
 | Secret 名称 | 必填 | 说明 |
 |---|---|---|
-| `PUSHPLUS_TOKEN` | ✅ | PushPlus 全局推送 Token |
+| `SMTP_HOST` | ✅ | SMTP 服务器：QQ `smtp.qq.com` / 163 `smtp.163.com` / 钉钉企业邮箱 `smtp.em.dingtalk.com` |
+| `SMTP_USER` | ✅ | 发件邮箱**完整地址** |
+| `SMTP_PASSWORD` | ✅ | **客户端授权码**（多数邮箱不是登录密码） |
+| `MAIL_TO` | ✅ | 收件人地址，多个用逗号分隔 |
+| `SMTP_PORT` | 可选 | 默认 `465`（隐式 SSL）；填 `587` 会自动走 STARTTLS |
+| `MAIL_FROM_NAME` | 可选 | 发件人显示名，默认「Sequoia-X 选股」 |
+| `NOTIFY_CHANNEL` | 可选 | `auto`（默认）/ `email` / `pushplus` / `both` / `none` |
+
+**PushPlus（可选，仅作备用）**：
+
+| Secret 名称 | 必填 | 说明 |
+|---|---|---|
+| `PUSHPLUS_TOKEN` | 可选 | PushPlus 全局推送 Token。⚠️ 正文有 **2 万字上限**，全市场股票池下容易超（`code 999`） |
 | `STRATEGY_WEBHOOK_MA_VOLUME` | 可选 | 均线放量策略专属 Token |
 | `STRATEGY_WEBHOOK_TURTLE` | 可选 | 海龟突破策略专属 Token |
 | `STRATEGY_WEBHOOK_FLAG` | 可选 | 高窄旗形策略专属 Token |
@@ -137,25 +151,25 @@ python main.py
 | `STRATEGY_WEBHOOK_RPS` | 可选 | RPS 突破策略专属 Token |
 | `STRATEGY_WEBHOOK_PRIVATE_PLACEMENT` | 可选 | 定增策略专属 Token |
 
-未配置的策略会自动回落到全局 `PUSHPLUS_TOKEN`（空值会被忽略，不会覆盖默认 token）。
+未配置专属 Token 的策略会自动回落到全局 `PUSHPLUS_TOKEN`（空值会被忽略，不会覆盖默认 token）。
 
-> **⚠️ Token 从哪来？**
+> **⚠️ 凭据从哪来？**
 > 在 Actions 上只能来自 GitHub Secrets —— 工作流是通过
-> `PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}` 把它注入成环境变量的。
+> `SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}` 这类写法把它注入成环境变量的。
 >
 > `.env` / `config.local.toml` / `.env.example` 在 Actions 上都**不可用**：
 > - `.env` 与 `config.local.toml` 被 `.gitignore` 排除，checkout 时根本不存在；
 > - `.env.example` / `config.example.toml` 只是给人复制用的**模板**，
 >   程序永远不会读它们。
 >
-> **千万不要把真实 token 写进模板文件** —— 它会被提交进仓库、公开可见。
-> 如果曾经写过，请立刻去 PushPlus 后台重置 token 并更新 Secret，
+> **千万不要把真实凭据写进模板文件** —— 它会被提交进仓库、公开可见。
+> 如果曾经写过，请立刻去对应平台重置并更新 Secret，
 > 光删文件没用（git 历史里还在）。
 >
-> 本地运行怎么配 token，见 **[RUNNING.md](RUNNING.md)**。
+> 本地运行怎么配，见 **[RUNNING.md](RUNNING.md)**。
 
-工作流第一步就会校验 `PUSHPLUS_TOKEN` 是否为空，没配会立刻报错退出，
-不会白跑几分钟才在推送阶段失败。
+工作流第一步就会校验通知配置：按 `NOTIFY_CHANNEL` 检查对应参数是否齐备，
+没配会立刻报错退出，不会白跑几分钟才在推送阶段失败。
 
 ### 2. 定时运行
 
@@ -340,9 +354,16 @@ k = 库中最后一日后复权收盘 ÷ 该日的前复权收盘
 *板块为东财行业分类；买卖点为策略信号参考，不构成投资建议*
 ```
 
-### 排版规则（`notify/pushplus.py`）
+### 排版规则
 
-#### 🔴 PushPlus 的 markdown 方言（改排版前必读）
+两条渠道的版式各自独立，改版式前先认准是哪一条：
+
+- **邮件**（`notify/email_sender.py`）：HTML 邮件，**table 布局 + 全内联样式**
+  （`<style>` 与 class 会被多数客户端剥掉），`multipart/alternative` 另附纯文本兜底。
+  没有字数限制，信息密度更高。
+- **PushPlus**（`notify/pushplus.py`）：markdown，受下面这套方言限制。
+
+#### 🔴 PushPlus 的 markdown 方言（改 PushPlus 版式前必读）
 
 模板走的是标准 **GFM**，**单个 `\n` 会被折叠成空格**：
 
@@ -379,7 +400,8 @@ k = 库中最后一日后复权收盘 ÷ 该日的前复权收盘
 数据没更新到当天时，头部会标出真实数据截止日：
 `📅 **2026-10-10**（⚠️ 数据截止 2026-10-09）`。
 
-各策略的中文名、买点、卖点（定义在 `sequoia_x/notify/pushplus.py` 的 `STRATEGY_DISPLAY`）：
+各策略的中文名、买点、卖点（定义在 `sequoia_x/notify/strategies.py` 的 `STRATEGY_DISPLAY`，
+邮件与 PushPlus 两个渠道共用这一份文案）：
 
 | 类名 | 中文名 | 买点 | 卖点（参考） |
 | --- | --- | --- | --- |
@@ -443,6 +465,9 @@ Sequoia-X/
 │   │   ├── rps_breakout.py      # RPS 突破策略
 │   │   └── private_placement.py # 定增公告监控
 │   └── notify/
+│       ├── __init__.py          # build_notifier：按配置组装通知渠道
+│       ├── strategies.py        # 策略中文名/买点/卖点 + 股票链接（各渠道共用）
+│       ├── email_sender.py      # 邮件汇总推送（HTML 版式 + SMTP 发送）
 │       └── pushplus.py          # PushPlus 汇总推送（仅负责渲染 + 发送）
 └── tests/                       # 属性测试（hypothesis）
 ```
