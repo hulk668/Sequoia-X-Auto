@@ -75,6 +75,24 @@ enable_akshare_fallback = true
 
 **`config.local.toml` 已加入 `.gitignore`，不会被提交**，可以放心写真实 token。
 
+### 2.1 配完先自检一下（强烈建议）
+
+邮件配置只在**跑起来之后**才会被用到，配错了要等一整天（或手动触发一次 Actions）
+才知道。先用这个脚本在本地验一遍，5 秒出结果：
+
+```bash
+python scripts/test_mail.py --preview   # 不联网，只渲染一封示例邮件看排版（不需要密码）
+python scripts/test_mail.py --no-send   # 测连接 + 登录，不发信
+python scripts/test_mail.py             # 完整链路：连接 → 登录 → 给自己发一封测试邮件
+```
+
+它会先打印本次实际使用的配置（密码脱敏），再把 SMTP 抛出的原始错误翻成人话。
+例如认证被拒时不会只丢一句 `535`，而是直接列出四条该去改的地方。
+
+> ⚠️ 若 `smtp_password` 还没填，程序启动时会**直接报错退出**（提示
+> `notify_channel=email，但邮件参数不全`）—— 这是故意的，好过跑完策略才在推送阶段失败。
+> 临时只想跑策略不需要通知时，把 `notify_channel` 改成 `"none"` 即可。
+
 <details>
 <summary>配置优先级 & 兼容旧方式</summary>
 
@@ -239,6 +257,7 @@ PushPlus 推送成功 [MaVolumeStrategy + TurtleTradeStrategy + ...]
 `smtp_password` / `mail_to` 缺一不可），也没有 `pushplus_token`。配其中一组即可。
 
 **Q：邮件发不出去，日志说「SMTP 认证被拒」？**
+先跑 `python scripts/test_mail.py` —— 它会把完整的 SMTP 报错和排查方向打出来。
 多半是把邮箱**登录密码**填进了 `smtp_password`。QQ / 163 / 钉钉企业邮箱等
 都需要单独生成「客户端授权码」，并且要先在邮箱设置里**开启 SMTP 服务**。
 

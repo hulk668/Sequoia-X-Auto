@@ -451,7 +451,8 @@ Sequoia-X/
 ├── config.local.toml            # 【已 gitignore】本机真实配置，不会被提交
 ├── .env.example                 # 传统环境变量模板（仍兼容）
 ├── scripts/
-│   └── pack_seed.py             # 数据库 → 种子压缩包（裁剪 + VACUUM + gzip -9）
+│   ├── pack_seed.py             # 数据库 → 种子压缩包（裁剪 + VACUUM + gzip -9）
+│   └── test_mail.py             # 邮件自检：连接 / 登录 / 发测试邮件 / 渲染预览
 ├── data/                        # SQLite 数据库（运行时生成，不入 git）
 │   └── seed/                    # 只跟踪 VERSION 与 README.md；gz 放 GitHub Release
 ├── sequoia_x/
