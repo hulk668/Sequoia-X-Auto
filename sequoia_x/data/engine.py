@@ -60,7 +60,46 @@ _DROP_LEGACY_CONCEPT_TABLE_SQL = "DROP TABLE IF EXISTS stock_concept;"
 _BOARD_TTL_DAYS = 30
 
 # 并发拉取时的线程数（akshare 是 HTTP 任务，用线程比进程省）
-_AK_CONCURRENCY = 8
+_AK_CONCURRENCY = 16
+
+# 单次 HTTP 请求的超时（秒）。akshare 的接口内部不暴露 timeout，
+# 而东财在部分网络下会「连上但不给响应」—— 一个这样的请求就足以把整轮拖住。
+_AK_HTTP_TIMEOUT = 20
+
+# 进度日志间隔：每完成这么多只打一行，避免长跑时日志看起来像卡死
+_AK_PROGRESS_EVERY = 500
+
+_REQUESTS_TIMEOUT_PATCHED = False
+
+
+def _ensure_request_timeout() -> None:
+    """给进程内的 requests 请求补一个默认超时（幂等）。
+
+    akshare 内部走 `requests` 且不传 timeout，等于**无限等待**。一旦某个请求
+    卡在「连接已建立但服务器不响应」的状态，线程池里那个 worker 就再也不会返回。
+    因为主流程是用 `as_completed` 收集全部结果后才继续的，表现就是日志停在
+    「并发拉取中...」纹丝不动，直到 job 超时。
+
+    这里用 `setdefault` 打补丁：显式传了 timeout 的调用（例如东财 F10 接口传的 15）
+    不受影响，只有没传的那些才被兜上默认值。
+    """
+    global _REQUESTS_TIMEOUT_PATCHED
+    if _REQUESTS_TIMEOUT_PATCHED:
+        return
+    try:
+        import requests
+
+        _orig_request = requests.Session.request
+
+        def _request_with_timeout(self, method, url, **kwargs):  # noqa: ANN001
+            kwargs.setdefault("timeout", _AK_HTTP_TIMEOUT)
+            return _orig_request(self, method, url, **kwargs)
+
+        requests.Session.request = _request_with_timeout
+        _REQUESTS_TIMEOUT_PATCHED = True
+        logger.debug(f"已为 requests 补上默认超时 {_AK_HTTP_TIMEOUT}s")
+    except Exception as exc:  # noqa: BLE001 - 打不上补丁也不能影响主流程
+        logger.warning(f"为 requests 补默认超时失败（不影响主流程）：{exc}")
 
 # 东财 F10 公司概况接口（含 EM2016 行业分类）与批量大小。
 # 接口支持 `SECUCODE in (...)`，90 只股票只要 2 次请求，
@@ -470,11 +509,21 @@ class DataEngine:
         Returns:
             实际写入的行数；失败为 0。
         """
-        from concurrent.futures import ThreadPoolExecutor
-        from datetime import date
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from datetime import date, datetime
 
         if today is None:
             today = date.today().strftime("%Y-%m-%d")
+
+        # A 股周末不开盘。周末手动触发时，全市场 5000+ 只会一只都拿不到新数据，
+        # 白拉十几分钟。定时任务 cron 是 1-5、本来落不到周末，这里防的是手动运行。
+        # （节假日无法用日历简单判断，那种情况靠拉取结果自然收敛，不会出错。）
+        try:
+            if datetime.strptime(today, "%Y-%m-%d").weekday() >= 5:
+                logger.info(f"akshare：{today} 是周末，A 股不开盘，跳过增量更新")
+                return 0
+        except ValueError:
+            pass  # today 格式异常就不拦，交给下游逻辑处理
 
         anchors = self._load_anchor()
         if not anchors:
@@ -490,13 +539,35 @@ class DataEngine:
             logger.info("akshare：所有股票已是最新，无需更新")
             return 0
 
-        logger.info(f"akshare：需要更新 {len(tasks)} 只股票，并发拉取中...")
+        logger.info(
+            f"akshare：需要更新 {len(tasks)} 只股票，{_AK_CONCURRENCY} 线程并发拉取中"
+            f"（每 {_AK_PROGRESS_EVERY} 只报告一次进度）..."
+        )
+
+        # 先给 requests 补上默认超时，避免个别请求「连上但无响应」把整轮拖死
+        _ensure_request_timeout()
 
         records: list[list] = []
         failed = 0
         try:
+            # 用 as_completed 而不是 pool.map：map 按**提交顺序**产出结果，
+            # 前面某只慢就会挡住后面已经完成的结果，日志表现为长时间纹丝不动
+            # （曾因此在周末白跑二十分钟且看不到任何进展）。
+            # 这里按完成顺序收集，并周期性汇报进度。
+            fetched: list[list] = [[] for _ in tasks]
+            done = 0
+            total = len(tasks)
             with ThreadPoolExecutor(max_workers=_AK_CONCURRENCY) as pool:
-                fetched = list(pool.map(_ak_fetch_one, tasks))
+                futures = {pool.submit(_ak_fetch_one, t): i for i, t in enumerate(tasks)}
+                for fut in as_completed(futures):
+                    idx = futures[fut]
+                    try:
+                        fetched[idx] = fut.result() or []
+                    except Exception as exc:  # noqa: BLE001 - 单只失败不影响其它
+                        logger.debug(f"akshare：{tasks[idx][0]} 拉取异常：{exc}")
+                    done += 1
+                    if done % _AK_PROGRESS_EVERY == 0 or done == total:
+                        logger.info(f"akshare：已拉取 {done}/{total}")
         except Exception as exc:  # noqa: BLE001 - 数据更新失败不应中断主流程
             logger.warning(f"akshare：并发拉取异常，放弃本次更新：{exc}")
             return 0
@@ -524,6 +595,7 @@ class DataEngine:
                 f"akshare：未取得任何新数据（{failed}/{len(tasks)} 只拉取失败）。"
                 f"数据库数据截止 {self.get_latest_date()}，"
                 f"本次选股将基于该日期及之前的数据。"
+                f"（非交易日、或当日行情尚未生成时属正常现象。）"
             )
             return 0
 
