@@ -16,11 +16,8 @@ class UptrendLimitDownStrategy(BaseStrategy):
     2. 放量跌停：今日**跌停**（按板块幅度判定，见 `base.is_limit_down`）
                 且今日 volume > **前20日**（不含今日）均量的 2.0 倍
 
-    Attributes:
-        webhook_key: 路由到 'limit_down' 专属推送 token。
     """
 
-    webhook_key: str = "limit_down"
     # 需要 61 根而不是 60 根：趋势要比较「昨日」的 ma20/ma60，
     # 昨日那一行也要有完整的 60 日窗口（否则 ma60 是 NaN，比较恒为 False）；
     # 均量改用 shift(1).rolling(20) 后也要 61 根。

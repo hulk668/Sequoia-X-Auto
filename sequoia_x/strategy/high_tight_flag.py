@@ -15,11 +15,8 @@ class HighTightFlagStrategy(BaseStrategy):
     3. 高位抗跌：最近10天最低价 >= 过去40天最高价 × 0.8（未从高位跌掉两成）
     4. 缩量：今日 volume < **前20日**（不含今日）volume 均值的 0.6 倍
 
-    Attributes:
-        webhook_key: 路由到 'flag' 专属推送 token。
     """
 
-    webhook_key: str = "flag"
     # 至少需要 40 根 K 线（tail(40) 窗口）
     _MIN_BARS: int = 40
 

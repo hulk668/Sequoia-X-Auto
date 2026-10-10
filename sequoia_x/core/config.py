@@ -65,18 +65,9 @@ class Settings(BaseSettings):
     start_date: str = "2024-01-01"
 
     # ── 通知通道 ──
-    # auto    配了邮件参数就用邮件，否则回落 PushPlus（默认）
-    # email   强制只发邮件
-    # pushplus 强制只发 PushPlus
-    # both    两边都发
-    # none    不发通知（只跑数据的工作流用，跳过通道校验）
-    notify_channel: str = "auto"
-
-    # ── PushPlus（已改为可选）──
-    # 历史上这里是必填；正文超过 2 万字会被服务端拒绝（code 999），
-    # 全市场股票池补齐后很容易触顶，因此新增了邮件通道并把它降级为可选。
-    pushplus_token: str = ""
-    strategy_webhooks: dict[str, str] = {}
+    # email  发邮件（默认）
+    # none   不发通知（只跑数据/只调策略时用，跳过邮件参数校验）
+    notify_channel: str = "email"
 
     # ── 邮件 / SMTP ──
     # 465 走隐式 SSL，其余端口按 STARTTLS 升级
@@ -114,15 +105,14 @@ class Settings(BaseSettings):
     def _validate_channels(self) -> "Settings":
         """校验通知通道配置是否自洽。
 
-        历史上 pushplus_token 是**必填**字段。改成邮件通道后换成
-        「至少有一个可用通道」：单一通道模式强制对应参数齐全，auto 模式两者取其一。
-        这样既不会出现「配好了邮件却因为没填 PushPlus token 起不来」，
-        也不会出现「什么都没配、一路跑到推送阶段才报错」。
+        `notify_channel = "email"` 时邮件参数必须齐全，否则**启动就报错** ——
+        比跑完几千只股票再在推送阶段失败体面得多。
+        只跑数据/只调策略时把 `notify_channel` 设成 `"none"` 即可跳过校验。
         """
-        channel = (self.notify_channel or "auto").strip().lower()
+        channel = (self.notify_channel or "email").strip().lower()
         object.__setattr__(self, "notify_channel", channel)
 
-        allowed = {"auto", "email", "pushplus", "both", "none"}
+        allowed = {"email", "none"}
         if channel not in allowed:
             raise ValueError(
                 f"notify_channel 取值非法：{channel!r}。可选 {' / '.join(sorted(allowed))}。"
@@ -130,23 +120,11 @@ class Settings(BaseSettings):
         if channel == "none":
             return self  # 明确表示不发通知，跳过校验
 
-        has_mail = self._has_mail_config()
-        has_push = bool(self.pushplus_token and self.pushplus_token.strip())
-
-        if channel == "email" and not has_mail:
+        if not self._has_mail_config():
             raise ValueError(
                 "notify_channel=email，但邮件参数不全。请设置 SMTP_HOST / SMTP_USER / "
                 "SMTP_PASSWORD / MAIL_TO（本地写在 config.local.toml，CI 上配成 repository secret）。"
-            )
-        if channel == "pushplus" and not has_push:
-            raise ValueError("notify_channel=pushplus，但 PUSHPLUS_TOKEN 为空。")
-        if channel == "both" and not (has_mail and has_push):
-            raise ValueError("notify_channel=both，需要同时配好邮件参数与 PUSHPLUS_TOKEN。")
-        if channel == "auto" and not (has_mail or has_push):
-            raise ValueError(
-                "未配置任何通知通道。请在 config.local.toml（或环境变量）中设置邮件参数"
-                " SMTP_HOST / SMTP_USER / SMTP_PASSWORD / MAIL_TO，或设置 PUSHPLUS_TOKEN。"
-                "详见 RUNNING.md。"
+                "只想跑策略不要通知的话，把 notify_channel 设成 \"none\"。"
             )
         return self
 
@@ -161,23 +139,12 @@ class Settings(BaseSettings):
         """实际要使用的通知渠道列表。
 
         Returns:
-            `["email"]` / `["pushplus"]` / `["email", "pushplus"]` / `[]`
+            `["email"]`，或 `[]`（`notify_channel = "none"` 时）。
         """
-        channel = (self.notify_channel or "auto").strip().lower()
+        channel = (self.notify_channel or "email").strip().lower()
         if channel == "none":
             return []
-        if channel == "email":
-            return ["email"]
-        if channel == "pushplus":
-            return ["pushplus"]
-        if channel == "both":
-            return ["email", "pushplus"]
-        # auto：优先邮件（没有字数上限、排版更好），没有才回落 PushPlus
-        if self._has_mail_config():
-            return ["email"]
-        if self.pushplus_token and self.pushplus_token.strip():
-            return ["pushplus"]
-        return []
+        return ["email"]
 
     @classmethod
     def settings_customise_sources(
@@ -199,26 +166,6 @@ class Settings(BaseSettings):
             file_secret_settings,
         )
 
-    def model_post_init(self, __context: object) -> None:
-        """初始化后合并 STRATEGY_WEBHOOK_ 前缀的环境变量到 strategy_webhooks。
-
-        配置文件里的 [strategy_webhooks] 段已由 pydantic 直接解析；
-        这里只做环境变量的补充覆盖，方便 CI 用 Secrets 单独配置某个策略的 token。
-        """
-        import os
-
-        prefix = "STRATEGY_WEBHOOK_"
-        webhooks: dict[str, str] = dict(self.strategy_webhooks)
-        for key, value in os.environ.items():
-            # 忽略空字符串：CI 中未配置的 Secret 会被注入为 ""，
-            # 若不过滤会覆盖掉配置文件里的值，导致推送使用空 token 而失败。
-            if key.upper().startswith(prefix) and value.strip():
-                strategy_key = key[len(prefix):].lower()
-                webhooks[strategy_key] = value.strip()
-
-        # 使用 object.__setattr__ 绕过 pydantic 的不可变保护
-        object.__setattr__(self, "strategy_webhooks", webhooks)
-
 
 _settings: Settings | None = None
 
@@ -227,15 +174,14 @@ def get_settings() -> Settings:
     """返回全局 Settings 单例。
 
     首次调用时按「环境变量 > config.local.toml > 默认值」的顺序加载配置。
-    若没有任何可用的通知通道（邮件参数不全、同时也没有 PUSHPLUS_TOKEN），
-    抛出 pydantic_core.ValidationError —— 与其跑完全部策略才在推送阶段失败，
-    不如一开始就说清楚缺什么。
+    若 `notify_channel = "email"` 而邮件参数不全，抛 pydantic_core.ValidationError ——
+    与其跑完全部策略才在推送阶段失败，不如一开始就说清楚缺什么。
 
     Returns:
         Settings: 全局唯一的配置实例。
 
     Raises:
-        pydantic_core.ValidationError: 通知通道配置缺失或字段类型不匹配时抛出。
+        pydantic_core.ValidationError: 通知配置缺失或字段类型不匹配时抛出。
     """
     global _settings
     if _settings is None:

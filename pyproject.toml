@@ -1,7 +1,7 @@
 [project]
 name = "sequoiax-autoplus"
 version = "3.0.0"
-description = "A 股量化选股系统：7 个确定性策略 + 邮件 / PushPlus 推送，可跑在 GitHub Actions 上"
+description = "A 股量化选股系统：7 个确定性策略 + 邮件推送，可跑在 GitHub Actions 上"
 requires-python = ">=3.11"
 dependencies = [
     "akshare>=1.10",

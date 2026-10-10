@@ -46,8 +46,8 @@ cp config.example.toml config.local.toml
 db_path = "data/sequoia_v2.db"
 start_date = "2024-01-01"
 
-# 通知渠道：auto = 配了邮件就用邮件，否则回落 PushPlus
-notify_channel = "auto"
+# 通知开关：email = 发邮件（默认）；none = 不发通知，只写日志
+notify_channel = "email"
 
 # ── 邮件（推荐）──
 # ⚠️ smtp_password 多数邮箱要填「客户端授权码」，不是登录密码
@@ -62,12 +62,11 @@ mail_to = "收件人@example.com"      # 多个用逗号分隔
 skip_sync = false
 ```
 
-> **为什么默认走邮件**：PushPlus 正文有 **2 万字上限**，股票池补齐全市场（5000+ 只）
-> 之后很容易超限，服务端直接报 `code 999 发送内容过大`。邮件没有这个限制，
-> 而且收到的是带样式的 HTML 版。想继续用 PushPlus 就把 `notify_channel` 设成
-> `pushplus`（或 `both`）并填好 `pushplus_token`。
+> **为什么只走邮件**：微信推送类服务（PushPlus 等）的正文有 **2 万字上限**，
+> 股票池补齐全市场（5000+ 只）之后很容易超限，服务端直接报 `code 999 发送内容过大`。
+> 邮件没有这个限制，而且收到的是带样式的 HTML 版。
 
-**`config.local.toml` 已加入 `.gitignore`，不会被提交**，可以放心写真实 token。
+**`config.local.toml` 已加入 `.gitignore`，不会被提交**，可以放心写真实密码。
 
 ### 2.1 配完先自检一下（强烈建议）
 
@@ -98,25 +97,16 @@ python scripts/test_mail.py             # 完整链路：连接 → 登录 → �
 SMTP_PASSWORD=你的授权码 MAIL_TO=收件人@example.com python main.py
 ```
 
-也可以临时切到 PushPlus：
+只想跑策略、不要通知：
 
 ```bash
-PUSHPLUS_TOKEN=xxx NOTIFY_CHANNEL=pushplus python main.py
+NOTIFY_CHANNEL=none python main.py
 ```
 
-给某个策略单独配推送 token，在 `config.local.toml` 里加：
-
-```toml
-[strategy_webhooks]
-turtle = "该策略专属的token"
-```
-
-策略标识见 `sequoia_x/strategy/*.py` 里的 `webhook_key`：
-`ma_volume` / `turtle` / `flag` / `shakeout` / `limit_down` / `rps` / `private_placement`。
-未配置的策略自动使用全局 `pushplus_token`。
-
-> 早期版本支持 `.env`，**现已移除** —— 它会以环境变量身份参与配置、优先级高于
-> `config.local.toml`，留一个陈旧 `.env` 会静默盖掉配置文件里的值。现在只读这一个文件。
+> 早期版本支持 `.env` 和 PushPlus 通道，**现在都已移除**。
+> `.env` 之所以去掉：它加载后是以环境变量身份参与配置的，优先级高于
+> `config.local.toml` —— 留一个陈旧的 `.env` 会静默盖掉配置文件里的值，排查很费劲。
+> 现在配置只读 `config.local.toml` 一个文件。
 </details>
 
 ---
@@ -236,9 +226,9 @@ MaVolumeStrategy 选出 24 只股票
 
 ## 6. 常见问题
 
-**Q：提示「未配置任何通知通道」？**
-`config.local.toml` 里既没配全邮件参数（`smtp_host` / `smtp_user` /
-`smtp_password` / `mail_to` 缺一不可），也没有 `pushplus_token`。配其中一组即可。
+**Q：启动就报「通知配置校验失败」/「邮件参数不全」？**
+`config.local.toml` 里 `smtp_host` / `smtp_user` / `smtp_password` / `mail_to`
+四个必须都填。只想跑策略不要通知的话，把 `notify_channel` 改成 `"none"` 即可跳过校验。
 
 **Q：邮件发不出去，日志说「SMTP 认证被拒」？**
 先跑 `python scripts/test_mail.py` —— 它会把完整的 SMTP 报错和排查方向打出来。
@@ -267,9 +257,10 @@ MaVolumeStrategy 选出 24 只股票
 找不到就是这个账号没开通该能力，换 QQ / 163 发件即可（配置全参数化，不用改代码）。
 如果企业本来就有钉钉企业邮箱（企业域名后缀），让管理员把你加进去才是正路。
 
-**Q：想继续用 PushPlus，但它报 `code 999 发送内容过大`？**
-PushPlus 正文上限 2 万字，股票池补齐全市场后容易触顶。改用邮件
-（`notify_channel = "email"`）即可绕开 —— 邮件没有字数限制。
+**Q：为什么不用 PushPlus / 微信推送了？**
+它的正文有 **2 万字上限**，股票池补齐全市场（5000+ 只）之后一轮很容易触顶，
+服务端直接报 `code 999 发送内容过大`。邮件没有字数限制，还能排版成带样式的 HTML，
+所以这个版本把 PushPlus 整条通道去掉了，只保留邮件。
 
 **Q：推送里日期带 `⚠️ 数据截止 ...`？**
 说明本次没抓到新数据（通常是交易日还没收盘，或数据源不通）。

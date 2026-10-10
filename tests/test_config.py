@@ -34,7 +34,7 @@ def _isolate_config(monkeypatch):
 def test_env_overrides_default(db_path: str, monkeypatch) -> None:
     """属性 1：任意合法 db_path 通过环境变量设置后，Settings 实例应反映该值。"""
     monkeypatch.setenv("DB_PATH", db_path)
-    monkeypatch.setenv("PUSHPLUS_TOKEN", "test-token")
+    monkeypatch.setenv("NOTIFY_CHANNEL", "none")
 
     from sequoia_x.core.config import Settings
 
@@ -42,46 +42,48 @@ def test_env_overrides_default(db_path: str, monkeypatch) -> None:
     assert s.db_path == db_path
 
 
-# Feature: sequoia-x-v2, Property 2: 缺失必填字段触发 ValidationError
-def test_missing_required_field_raises(monkeypatch) -> None:
-    """属性 2：缺少 pushplus_token 时，实例化 Settings 应抛出 ValidationError。"""
+# Feature: sequoia-x-v2, Property 2: 缺少必填的通知参数触发 ValidationError
+def test_missing_mail_config_raises(monkeypatch) -> None:
+    """属性 2：选了 email 但邮件参数不全时，实例化 Settings 应抛出 ValidationError。"""
     from sequoia_x.core.config import Settings
 
-    monkeypatch.delenv("PUSHPLUS_TOKEN", raising=False)
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+    monkeypatch.delenv("MAIL_TO", raising=False)
 
     with pytest.raises(ValidationError) as exc_info:
-        Settings()
-    assert "pushplus_token" in str(exc_info.value).lower()
+        Settings(notify_channel="email")
+    assert "邮件参数不全" in str(exc_info.value)
 
 
-def test_blank_token_raises(monkeypatch) -> None:
+def test_blank_mail_param_raises(monkeypatch) -> None:
     """未配置的 GitHub Secret 会以空字符串注入，必须被拦住（否则跑到推送才失败）。"""
     from sequoia_x.core.config import Settings
 
-    monkeypatch.setenv("PUSHPLUS_TOKEN", "   ")
+    monkeypatch.setenv("SMTP_PASSWORD", "   ")
 
     with pytest.raises(ValidationError) as exc_info:
-        Settings()
-    assert "pushplus_token" in str(exc_info.value).lower()
+        Settings(notify_channel="email", smtp_host="smtp.example.com",
+                 smtp_user="bot@example.com", mail_to="ops@example.net")
+    assert "邮件参数不全" in str(exc_info.value)
 
 
 def test_blank_bool_is_false(monkeypatch) -> None:
     """workflow_dispatch 的 input 在定时触发时为空串，布尔字段应按 False 处理。"""
     from sequoia_x.core.config import Settings
 
-    monkeypatch.setenv("PUSHPLUS_TOKEN", "test-token")
+    monkeypatch.setenv("NOTIFY_CHANNEL", "none")
     monkeypatch.setenv("SKIP_SYNC", "")
 
     s = Settings()
     assert s.skip_sync is False
 
 
-def test_blank_strategy_webhook_env_ignored(monkeypatch) -> None:
-    """STRATEGY_WEBHOOK_ 前缀的空 Secret 不应覆盖配置文件里的值。"""
+def test_none_channel_skips_mail_validation() -> None:
+    """notify_channel=none 时不校验邮件参数 —— 本地只调策略的场景。"""
     from sequoia_x.core.config import Settings
 
-    monkeypatch.setenv("PUSHPLUS_TOKEN", "test-token")
-    monkeypatch.setenv("STRATEGY_WEBHOOK_RPS", "")
+    s = Settings(notify_channel="none")
 
-    s = Settings(strategy_webhooks={"rps": "from-config"})
-    assert s.strategy_webhooks == {"rps": "from-config"}
+    assert s.effective_channels() == []

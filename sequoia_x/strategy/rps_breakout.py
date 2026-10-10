@@ -21,12 +21,10 @@ class RpsBreakoutStrategy(BaseStrategy):
     逐只算出两个标量再统一排名即可，没必要把整张表读成一个长表。
 
     Attributes:
-        webhook_key: 路由到 'rps' 专属推送 token。
         rps_period: 计算涨幅的回看交易日数。
         rps_threshold: RPS 阈值（百分位）。
     """
 
-    webhook_key: str = "rps"
     rps_period: int = 120
     rps_threshold: int = 90
     # 需要 121 根：`shift(120)` 要取到 120 根之前的那一天

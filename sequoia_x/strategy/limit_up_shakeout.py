@@ -22,11 +22,8 @@ class LimitUpShakeoutStrategy(BaseStrategy):
     在它基础上再翻倍把交集压到只剩 3%，几乎选不出票；改用 20 日均量后
     与「放量」的常规含义一致，也和其它策略的口径统一。
 
-    Attributes:
-        webhook_key: 路由到 'shakeout' 专属推送 token。
     """
 
-    webhook_key: str = "shakeout"
     # 至少 3 根 K 线（前日、昨日、今日）；下面的均量窗口不足时自然为 NaN，
     # 会被显式判空跳过，不影响 3 根即可入场的前两条条件。
     _MIN_BARS: int = 3

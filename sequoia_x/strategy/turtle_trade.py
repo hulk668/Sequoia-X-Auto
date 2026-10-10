@@ -19,11 +19,8 @@ class TurtleTradeStrategy(BaseStrategy):
 
     结果按**当日成交额**从大到小排序，活跃的排前面。
 
-    Attributes:
-        webhook_key: 路由到 'turtle' 专属推送 token。
     """
 
-    webhook_key: str = "turtle"
     _MIN_BARS: int = 21  # 至少需要 21 根 K 线（20日窗口 + 当日）
     # 流动性门槛：当日成交额过亿
     _MIN_TURNOVER: float = 100_000_000

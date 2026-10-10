@@ -64,14 +64,7 @@ class BaseStrategy(ABC):
     """选股策略抽象基类。
 
     所有具体策略必须继承此类并实现 run() 方法。
-
-    Attributes:
-        webhook_key: 策略对应的推送路由标识，用于把不同策略的结果推到不同 token。
-            默认为 'default'，将使用全局 Settings.pushplus_token。
-            子类可覆盖此属性以路由到专属 token，例如 'ma_volume'。
     """
-
-    webhook_key: str = "default"
 
     #: 策略计算所需的最少 K 线根数。子类按自己最长的一个窗口覆盖。
     _MIN_BARS: int = 1

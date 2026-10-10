@@ -17,11 +17,8 @@ class MaVolumeStrategy(BaseStrategy):
     条件会变成一个绕圈的隐式不等式（等价于要求 `今日量 > 前19日均量 × 1.54`），
     和其它策略的写法也对不上。
 
-    Attributes:
-        webhook_key: 路由到 'ma_volume' 专属推送 token。
     """
 
-    webhook_key: str = "ma_volume"
     # 需要 21 根而不是 20 根：金叉要比较「昨日」的 ma5/ma20，昨日那一行
     # 也要有完整的 20 日窗口（否则 ma20 是 NaN，比较恒为 False）。
     # 均量改用 shift(1).rolling(20) 后同样需要 21 根。

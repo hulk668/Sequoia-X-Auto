@@ -1,7 +1,9 @@
 """邮件通知模块：把选股结果渲染成一份 HTML 邮件发出。
 
-**为什么要有这条通道**：PushPlus 的正文有 2 万字上限，全市场股票池补齐到
-5223 只之后，一轮选股很容易超过（实测收到 `code:999 发送内容过大`）。
+只能靠标准库 `smtplib` / `email`，不需要任何第三方包。
+
+**为什么选邮件**：微信推送类服务（PushPlus 等）的正文有 2 万字上限，
+全市场股票池补齐到 5223 只之后，一轮选股很容易超过（实测报 `code:999 发送内容过大`）。
 邮件没有这个限制，而且能排版得更好看。
 
 **邮件客户端的坑**（决定了下面为什么这么写）：
@@ -64,7 +66,7 @@ _FONT = (
 _MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
 
 # 邮件正文里「只有 1 只的板块」不单独占一组，统一并到「其他板块」，
-# 避免 20 多个单只板块把邮件撑得过长（与 PushPlus 版的处理思路一致）。
+# 避免 20 多个单只板块把邮件撑得过长。
 _SINGLES_TITLE = "其他板块"
 
 
@@ -421,7 +423,7 @@ class EmailNotifier:
 
     def send_digest(
         self,
-        results: Mapping[str, tuple[list[str], str]],
+        results: Mapping[str, list[str]],
         names: Mapping[str, str] | None = None,
         data_date: str | None = None,
         boards: Mapping[str, str] | None = None,
@@ -429,7 +431,7 @@ class EmailNotifier:
         """汇总所有策略的选股结果，渲染成一封邮件发出。
 
         Args:
-            results: {策略名: (选股代码列表, webhook_key)}。无结果的策略自动跳过。
+            results: {策略名: 选股代码列表}。无结果的策略自动跳过。
             names: {代码: 股票名称}，由 DataEngine.get_stock_names() 提供。
             data_date: 数据库数据的截止日期（YYYY-MM-DD），与运行日期不一致时会在邮件里标 ⚠️。
             boards: {代码: 行业板块}，由 DataEngine.get_boards() 提供。
@@ -438,7 +440,7 @@ class EmailNotifier:
             是否发送成功。不抛异常 —— 通知失败不应让整轮选股算作失败。
         """
         active: list[tuple[str, list[str]]] = [
-            (name, symbols) for name, (symbols, _key) in results.items() if symbols
+            (name, symbols) for name, symbols in results.items() if symbols
         ]
         if not active:
             logger.info("所有策略均无选股结果，跳过邮件通知")

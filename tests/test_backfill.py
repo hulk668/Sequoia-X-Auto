@@ -28,7 +28,7 @@ def _engine_in(tmp_dir: str) -> tuple[DataEngine, Settings]:
     settings = Settings(
         db_path=str(Path(tmp_dir) / "test.db"),
         start_date="2024-01-01",
-        pushplus_token="test-token",
+        notify_channel="none",
     )
     return DataEngine(settings), settings
 

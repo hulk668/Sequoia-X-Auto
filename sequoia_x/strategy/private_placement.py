@@ -14,13 +14,9 @@ class PrivatePlacementStrategy(BaseStrategy):
     """定增公告监控策略。
 
     数据源：akshare stock_qbzf_em()（东方财富-全部增发）
-    逻辑：筛选最近 7 天内发行日期的定向增发公告，纳入当轮 PushPlus 汇总推送。
-
-    Attributes:
-        webhook_key: 路由到 'private_placement' 专属推送 token。
+    逻辑：筛选最近 7 天内发行日期的定向增发公告，纳入当轮汇总推送。
     """
 
-    webhook_key: str = "private_placement"
     _LOOKBACK_DAYS: int = 7  # 回看天数，覆盖一周内的新公告
 
     def run(self) -> list[str]:

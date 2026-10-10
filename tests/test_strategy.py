@@ -31,7 +31,7 @@ def test_strategy_run_returns_list_of_str(symbols: list[str]) -> None:
         settings = Settings(
             db_path=str(Path(tmp_dir) / "test.db"),
             start_date="2024-01-01",
-            pushplus_token="test-token",
+            notify_channel="none",
         )
         engine = DataEngine(settings)
 
@@ -66,7 +66,7 @@ class _FakeEngine:
 
 
 def _settings() -> Settings:
-    return Settings(pushplus_token="test-token")
+    return Settings(notify_channel="none")
 
 
 def _make_df(rows: list[dict]) -> pd.DataFrame:

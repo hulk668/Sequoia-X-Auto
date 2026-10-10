@@ -33,27 +33,14 @@ jobs:
       TZ: Asia/Shanghai          # 日志与 date.today() 走北京时间
       DB_PATH: data/sequoia_v2.db
       START_DATE: '2024-01-01'
-      # ── 通知渠道（auto = 配了邮件就用邮件，否则回落 PushPlus）──
-      NOTIFY_CHANNEL: ${{ secrets.NOTIFY_CHANNEL || 'auto' }}
-      # ── 邮件通知（推荐通道）──
-      # PushPlus 正文有 2 万字上限，股票池补齐到全市场后很容易超（code 999），
-      # 邮件没有这个限制，样式也更自由。
+      # ── 通知：只发邮件（notify_channel = email / none）──
+      NOTIFY_CHANNEL: ${{ secrets.NOTIFY_CHANNEL || 'email' }}
       SMTP_HOST: ${{ secrets.SMTP_HOST }}
       SMTP_PORT: ${{ secrets.SMTP_PORT || '465' }}
       SMTP_USER: ${{ secrets.SMTP_USER }}
       SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
       MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME || 'SequoiaX-AutoPlus 选股' }}
       MAIL_TO: ${{ secrets.MAIL_TO }}
-      # ── 备用：PushPlus 全局 Token（配了就会随渠道设置一起生效）──
-      PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-      # ── 可选：各策略专属 Token；未配置则自动回落到全局 PUSHPLUS_TOKEN ──
-      STRATEGY_WEBHOOK_MA_VOLUME: ${{ secrets.STRATEGY_WEBHOOK_MA_VOLUME }}
-      STRATEGY_WEBHOOK_TURTLE: ${{ secrets.STRATEGY_WEBHOOK_TURTLE }}
-      STRATEGY_WEBHOOK_FLAG: ${{ secrets.STRATEGY_WEBHOOK_FLAG }}
-      STRATEGY_WEBHOOK_SHAKEOUT: ${{ secrets.STRATEGY_WEBHOOK_SHAKEOUT }}
-      STRATEGY_WEBHOOK_LIMIT_DOWN: ${{ secrets.STRATEGY_WEBHOOK_LIMIT_DOWN }}
-      STRATEGY_WEBHOOK_RPS: ${{ secrets.STRATEGY_WEBHOOK_RPS }}
-      STRATEGY_WEBHOOK_PRIVATE_PLACEMENT: ${{ secrets.STRATEGY_WEBHOOK_PRIVATE_PLACEMENT }}
       # 手动触发时可勾选跳过数据更新；定时触发下该 input 为空字符串，
       # 配置层会把空串按 False 处理（见 Settings._blank_bool_is_false）
       SKIP_SYNC: ${{ github.event.inputs.skip_sync }}
@@ -69,15 +56,15 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      # 防止把真实 token 误提交进仓库（仓库是公开的）。
-      # PushPlus 的 token 是 32 位十六进制串，正常代码/文档里不应出现这种形态；
+      # 防止把真实密码/授权码误提交进仓库（仓库是公开的）。
+      # 32 位十六进制串是常见的 token 形态，正常代码/文档里不应出现；
       # \b 边界保证不会误伤锁文件里 64 位的 sha256。
       - name: 检查是否误提交密钥
         run: |
           hits=$(git grep -nIE '\b[0-9a-fA-F]{32}\b' -- . ':(exclude)data/seed' || true)
           if [ -n "$hits" ]; then
             echo "$hits"
-            echo "::error::检测到疑似 token 被提交进仓库。请立即把该值改为占位符，并到对应平台重置这个 token。"
+            echo "::error::检测到疑似密钥被提交进仓库。请立即把该值改为占位符，并到对应平台重置这个凭据。"
             exit 1
           fi
           echo "未发现疑似密钥 ✓"
@@ -87,47 +74,28 @@ jobs:
       # 判定规则与 sequoia_x/core/config.py 的通道校验保持一致。
       - name: 校验通知配置
         run: |
-          has_mail=true
-          for v in "$SMTP_HOST" "$SMTP_USER" "$SMTP_PASSWORD" "$MAIL_TO"; do
-            if [ -z "$v" ]; then has_mail=false; fi
-          done
-          has_push=false
-          if [ -n "$PUSHPLUS_TOKEN" ]; then has_push=true; fi
-          channel="${NOTIFY_CHANNEL:-auto}"
-
-          echo "渠道=$channel  邮件参数完整=$has_mail  PushPlus已配置=$has_push"
+          channel="${NOTIFY_CHANNEL:-email}"
 
           if [ "$channel" = "none" ]; then
             echo "NOTIFY_CHANNEL=none，本轮不发通知"
             exit 0
           fi
-
-          need_mail=false
-          need_push=false
-          case "$channel" in
-            email)    need_mail=true ;;
-            pushplus) need_push=true ;;
-            both)     need_mail=true; need_push=true ;;
-            auto)     : ;;   # 两者取其一即可，下面单独判
-            *)        echo "::error::NOTIFY_CHANNEL 取值非法：'$channel'（可选 auto/email/pushplus/both/none）"; exit 1 ;;
-          esac
-
-          if [ "$channel" = "auto" ]; then
-            if [ "$has_mail" = false ] && [ "$has_push" = false ]; then
-              echo "::error::未配置任何通知通道。请在仓库 Settings → Secrets 里配置 SMTP_HOST / SMTP_USER / SMTP_PASSWORD / MAIL_TO（推荐），或 PUSHPLUS_TOKEN。"
-              exit 1
-            fi
-          else
-            if [ "$need_mail" = true ] && [ "$has_mail" = false ]; then
-              echo "::error::NOTIFY_CHANNEL=$channel 需要邮件参数，但 SMTP_HOST / SMTP_USER / SMTP_PASSWORD / MAIL_TO 有缺项。"
-              exit 1
-            fi
-            if [ "$need_push" = true ] && [ "$has_push" = false ]; then
-              echo "::error::NOTIFY_CHANNEL=$channel 需要 PUSHPLUS_TOKEN，但它为空。"
-              exit 1
-            fi
+          if [ "$channel" != "email" ]; then
+            echo "::error::NOTIFY_CHANNEL 取值非法：'$channel'（可选 email / none）"
+            exit 1
           fi
-          echo "通知配置校验通过（敏感值由 GitHub 自动脱敏）"
+
+          missing=""
+          for v in SMTP_HOST SMTP_USER SMTP_PASSWORD MAIL_TO; do
+            if [ -z "${!v}" ]; then missing="$missing $v"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::NOTIFY_CHANNEL=email，但这些 Secret 没配：$missing"
+            echo "::error::请在 仓库 Settings → Secrets and variables → Actions 里补齐（推荐），"
+            echo "::error::或把 NOTIFY_CHANNEL 设成 none 表示本轮不发通知。"
+            exit 1
+          fi
+          echo "通知配置校验通过（邮件，敏感值由 GitHub 自动脱敏）"
 
       - name: 准备 Python
         uses: actions/setup-python@v5

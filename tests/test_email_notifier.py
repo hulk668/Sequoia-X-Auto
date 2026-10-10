@@ -48,7 +48,7 @@ def _notifier(**overrides) -> EmailNotifier:
     return EmailNotifier(Settings(**kwargs))
 
 
-# 与 test_pushplus.py 用同一份口径的数据：港口航运 3 只、电力 2 只，
+# 板块分组测试用的一份固定数据：港口航运 3 只、电力 2 只，
 # 其余 3 只各成一块（会被合并到「其他板块」）。
 NAMES = {
     "601975": "招商南油",
@@ -430,7 +430,7 @@ def test_send_digest_skips_when_no_strategy_has_results() -> None:
     called: list = []
     n._send = lambda *a, **k: called.append(a) or True  # type: ignore[method-assign]
 
-    assert n.send_digest({"MaVolumeStrategy": ([], "")}) is True
+    assert n.send_digest({"MaVolumeStrategy": []}) is True
     assert called == []
 
 
@@ -452,7 +452,7 @@ def test_send_digest_end_to_end_with_mocked_smtp() -> None:
     n._connect = lambda: FakeConn()  # type: ignore[method-assign]
 
     ok = n.send_digest(
-        {"MaVolumeStrategy": (list(NAMES), "")},
+        {"MaVolumeStrategy": list(NAMES)},
         NAMES,
         data_date="2020-01-01",
         boards=BOARDS,
@@ -469,57 +469,41 @@ def test_send_digest_end_to_end_with_mocked_smtp() -> None:
 # ── 通道装配 ──
 
 
-def test_build_notifier_email_only() -> None:
-    """notify_channel=email → 只装一个邮件通知器。"""
+def test_build_notifier_email_by_default() -> None:
+    """notify_channel 默认就是 email → 装出邮件通知器。"""
     from sequoia_x.core.config import Settings
-    from sequoia_x.notify import FanOutNotifier, build_notifier
+    from sequoia_x.notify import build_notifier
 
     notifier = build_notifier(Settings(**MAIL_SETTINGS))
 
-    assert isinstance(notifier, FanOutNotifier)
-    assert [type(x) for x in notifier._notifiers] == [EmailNotifier]
+    assert isinstance(notifier, EmailNotifier)
 
 
-def test_build_notifier_none_channel_has_no_backend() -> None:
+def test_build_notifier_none_channel_sends_nothing() -> None:
     """notify_channel=none → 空通知器，选股结果只落日志。"""
     from sequoia_x.core.config import Settings
-    from sequoia_x.notify import FanOutNotifier, build_notifier
+    from sequoia_x.notify import build_notifier
 
     notifier = build_notifier(Settings(notify_channel="none"))
 
-    assert isinstance(notifier, FanOutNotifier)
-    assert notifier._notifiers == []
+    assert notifier.send_digest({"MaVolumeStrategy": ["600000"]}) is True
 
 
-def test_fanout_keeps_going_after_one_channel_fails() -> None:
-    """单个渠道炸掉不影响其它渠道 —— 这是扇出的全部意义。"""
-    from sequoia_x.notify import FanOutNotifier
+def test_email_channel_requires_complete_mail_config() -> None:
+    """选了 email 但邮件参数不全 → 启动就报错，不要跑到推送阶段才失败。"""
+    from pydantic import ValidationError
 
-    class Boom:
-        def send_digest(self, *a, **k):
-            raise RuntimeError("boom")
+    from sequoia_x.core.config import Settings
 
-    class Ok:
-        def __init__(self) -> None:
-            self.called = False
-
-        def send_digest(self, *a, **k):
-            self.called = True
-            return True
-
-    ok = Ok()
-    notifier = FanOutNotifier([Boom(), ok])
-
-    assert notifier.send_digest({"X": (["1"], "")}) is True
-    assert ok.called is True
+    with pytest.raises(ValidationError, match="邮件参数不全"):
+        Settings(notify_channel="email", smtp_host="smtp.example.com")
 
 
-def test_fanout_treats_none_return_as_delivered() -> None:
-    """PushPlus 渠道返回 None，扇出要按「已投递」算，不能被当作失败。"""
-    from sequoia_x.notify import FanOutNotifier
+def test_unknown_notify_channel_rejected() -> None:
+    """notify_channel 只有 email / none 两个合法取值。"""
+    from pydantic import ValidationError
 
-    class Silent:
-        def send_digest(self, *a, **k):
-            return None
+    from sequoia_x.core.config import Settings
 
-    assert FanOutNotifier([Silent()]).send_digest({"X": (["1"], "")}) is True
+    with pytest.raises(ValidationError, match="取值非法"):
+        Settings(notify_channel="pushplus")
