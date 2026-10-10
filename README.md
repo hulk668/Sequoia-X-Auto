@@ -17,7 +17,8 @@ Sequoia-X V2 是面向 A 股市场的量化选股系统，基于现代 Python �
 ## 两种运行模式
 
 ```bash
-python main.py               # 日常模式：增量补数据 + 跑完所有策略 + 汇总后一次性 PushPlus 推送
+python main.py                # 日常模式：增量补数据 + 跑完所有策略 + 汇总后一次性 PushPlus 推送
+python main.py --skip-sync    # 跳过所有数据抓取，直接用库中现有数据选股
 python main.py --backfill     # 回填模式：全市场历史K线一次性灌入（约12分钟，接口不稳定时慎用）
 ```
 
@@ -205,8 +206,9 @@ k = 库中最后一日后复权收盘 ÷ 该日的前复权收盘
 
 数据与运行日期一致时不会显示这个提醒。
 
-也可以手动强制跳过：`workflow_dispatch` 勾选 `skip_sync`，或在本机设 `SKIP_SYNC=1`
-（跳过全部数据抓取——baostock 与 akshare 兜底都不跑，只跑策略，用于快速出结果）。
+也可以手动强制跳过：`workflow_dispatch` 勾选 `skip_sync`，或在本地用
+`python main.py --skip-sync`、`SKIP_SYNC=1 python main.py`、或在 `config.local.toml` 里设
+`skip_sync = true`（跳过全部数据抓取——baostock 与 akshare 兜底都不跑，只跑策略，用于快速出结果）。
 
 ### 5. 推送方式
 

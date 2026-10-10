@@ -36,6 +36,11 @@ def main() -> None:
         action="store_true",
         help="回填模式：通过 baostock 拉取全市场历史 K 线（约12分钟）",
     )
+    parser.add_argument(
+        "--skip-sync",
+        action="store_true",
+        help="跳过所有数据抓取（baostock + akshare 兜底），直接用库中现有数据选股",
+    )
     args = parser.parse_args()
 
     try:
@@ -45,6 +50,11 @@ def main() -> None:
         # 2. 初始化日志
         logger = get_logger(__name__)
         logger.info("Sequoia-X V2 启动")
+
+        # 命令行开关优先于配置文件：--skip-sync 只作用于本次运行，不用改配置
+        if args.skip_sync and not settings.skip_sync:
+            logger.warning("命令行指定 --skip-sync，本次运行跳过所有数据抓取")
+            object.__setattr__(settings, "skip_sync", True)
 
         # 3. 初始化数据引擎
         engine = DataEngine(settings)

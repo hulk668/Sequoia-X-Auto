@@ -120,6 +120,12 @@ python main.py
 
 做的事：增量同步最新行情 → 刷新股票名称 → 跑全部策略 → **汇总成一条** PushPlus 推送。
 
+再加上 `--skip-sync` 可以**跳过全部数据抓取**，直接用库里现有数据选股：
+
+```bash
+python main.py --skip-sync
+```
+
 流程日志会打印数据截止日期，例如：
 
 ```
@@ -140,11 +146,26 @@ PushPlus 推送成功 [MaVolumeStrategy + TurtleTradeStrategy + ...]
 
 ---
 
-## 5. 常用参数
+## 5. 跳过增量同步 / 常用参数
+
+**跳过增量同步**有三种方式，任选其一（效果相同）：
+
+| 方式 | 命令 / 配置 | 适用场景 |
+|---|---|---|
+| **命令行开关**（最省事） | `python main.py --skip-sync` | 临时跑一次，不动配置文件 |
+| **环境变量** | Git Bash / macOS / Linux：`SKIP_SYNC=1 python main.py`<br>Windows cmd：`set SKIP_SYNC=1 && python main.py`<br>PowerShell：`$env:SKIP_SYNC=1; python main.py` | 临时跑，或写进脚本 |
+| **配置文件** | `config.local.toml` 里 `skip_sync = true` | 长期生效，每次跑都跳过 |
+
+> ⚠️ 用配置文件方式记得**改回 `false`**，否则会一直跳过同步、数据停在旧日期。
+> 命令行开关只作用于当次运行，不会写回文件，所以日常临时跳过推荐用它。
+
+跳过同步后：不碰 baostock、不碰 akshare、不刷新股票名称，只读本地数据库跑策略。
+推送消息里的日期会是**数据的真实截止日**，例如 `日期：2026-10-10（⚠️ 数据截止 2026-10-09）`。
+
+**其它参数：**
 
 | 场景 | 做法 |
 |---|---|
-| 只跑策略、不抓数据 | `config.local.toml` 里 `skip_sync = true`，或 `SKIP_SYNC=1 python main.py` |
 | 关闭 akshare 兜底 | `config.local.toml` 里 `enable_akshare_fallback = false` |
 | 换数据库位置 | `config.local.toml` 里改 `db_path` |
 | 回填历史 | `python main.py --backfill` |
