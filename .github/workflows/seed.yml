@@ -15,6 +15,14 @@ name: Sequoia-X 发布数据库种子
 #    （例如 seed-2026-11-01），工作流会自动更新 VERSION 并提交，
 #    哈希一变 → daily 的旧缓存自动失效 → 下轮自动下载新种子。
 # 3. 同一个 tag 重发：直接覆盖资产，VERSION 不变，不影响既有缓存。
+#
+# ── 打包用的库从哪来（按优先级）─────────────────────────────
+#   a. 滚动缓存（最近一次，由 daily 日常维护）—— 正常情况走这条
+#   b. 缓存被 GitHub 回收时：本仓库 Release 里 VERSION 指向的那个种子
+#   c. 连种子都取不到：从零 --backfill（要 runner 能连上东财/腾讯，最不稳）
+# 只要 a 或 b 有一个成立，跑本工作流就是全自动的。
+# 只有「全新仓库且 Release 里也没有种子」才需要「本机打包 + 网页上传」兜底，
+# 见 data/seed/README.md。
 on:
   workflow_dispatch:
     inputs:
@@ -27,7 +35,7 @@ on:
         type: string
         default: '400'
       backfill_if_empty:
-        description: '缓存为空时自动补数（关掉则直接报错退出）'
+        description: '缓存与种子都取不到时，是否从零补数（关掉则报错退出）'
         type: boolean
         default: true
 
@@ -77,6 +85,39 @@ jobs:
           restore-keys: |
             sequoia-db-
 
+      # 缓存被 GitHub 回收（连续 7 天没跑）时库就不在了。此时**不要**直接去从零补数 ——
+      # 仓库 Release 里那个种子就是现成的最佳起点（它本来就是为了冷启动存在的）。
+      # 只有连种子都取不到，才退回到下面「确认数据库可用」里的补数路径。
+      - name: 缓存未命中则先用现有种子兜底
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eo pipefail
+          if [ -f data/sequoia_v2.db ]; then
+            echo "缓存已恢复（$(du -h data/sequoia_v2.db | cut -f1)），跳过种子兜底"
+            exit 0
+          fi
+
+          TAG="$(tr -d '[:space:]' < data/seed/VERSION)"
+          if [ -z "$TAG" ]; then
+            echo "::warning::data/seed/VERSION 为空，无法确定种子 tag，稍后按需从零补数"
+            exit 0
+          fi
+
+          echo "缓存未命中 → 尝试从现有种子 Release '$TAG' 引导……"
+          mkdir -p data/seed
+          if gh release download "$TAG" \
+                 --repo "${GITHUB_REPOSITORY}" \
+                 --pattern 'sequoia_v2.db.gz' \
+                 --dir data/seed --clobber \
+             && gunzip -c data/seed/sequoia_v2.db.gz > data/sequoia_v2.db; then
+            echo "已从 Release '$TAG' 引导数据库：$(du -h data/sequoia_v2.db | cut -f1)"
+          else
+            rm -f data/sequoia_v2.db
+            echo "::warning::从 Release '$TAG' 引导失败，稍后按需从零补数"
+          fi
+          rm -f data/seed/sequoia_v2.db.gz
+
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
@@ -108,10 +149,10 @@ jobs:
             fi
           else
             if [ "${{ inputs.backfill_if_empty }}" != "true" ]; then
-              echo "::error::缓存未命中，且本次未勾选自动补数。请勾选后重跑。"
+              echo "::error::缓存与种子都没取到，且本次未勾选自动补数。请勾选后重跑。"
               exit 1
             fi
-            echo "缓存未命中，从零补齐全市场"
+            echo "缓存与种子都没取到，从零补齐全市场"
           fi
 
           # backfill 只补「库里一行都没有」的股票，已有的不动 —— 天然幂等：
