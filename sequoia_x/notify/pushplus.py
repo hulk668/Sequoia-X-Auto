@@ -10,6 +10,7 @@ PushPlus API 文档：https://www.pushplus.plus/doc/guide/api.html
 import json
 from collections.abc import Mapping, Sequence
 from datetime import date
+from typing import NamedTuple
 
 import requests
 
@@ -21,39 +22,73 @@ logger = get_logger(__name__)
 # PushPlus 发送接口
 PUSHPLUS_API_URL = "https://www.pushplus.plus/send"
 
-# 策略展示信息：类名 → (中文名, 买点)。
-# 买点文案严格对应各策略源码里的入选条件，收到推送时无需回看代码即可看懂信号含义。
-# 新增策略时在此登记；未登记的类名会原样显示类名、不带买点。
-STRATEGY_DISPLAY: dict[str, tuple[str, str]] = {
-    "MaVolumeStrategy": (
+# 推送正文里股票链接每行显示多少只（便于在手机上快速扫读）
+_STOCKS_PER_LINE = 5
+
+# 策略序号用的带圈数字
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+
+
+class StrategyInfo(NamedTuple):
+    """策略的中文展示信息。
+
+    Attributes:
+        name: 中文名。
+        entry: 买点（严格对应策略源码里的入选条件）。
+        exit: 卖点（该策略对应的经典退出规则，仅供参考）。
+    """
+
+    name: str
+    entry: str
+    exit: str = ""
+
+
+# 策略展示信息：类名 → 展示信息。
+#
+# 买点严格对应各策略源码里的入选条件，收到推送时无需回看代码即可看懂信号含义。
+# 卖点是该策略对应的**经典退出规则**，只作为参考提示 —— 系统只负责选股，
+# 不跟踪持仓、不会推送卖出提醒，仓位同样需要自己管理。
+# 新增策略时在此登记；未登记的类名会原样显示类名、不带买卖点。
+STRATEGY_DISPLAY: dict[str, StrategyInfo] = {
+    "MaVolumeStrategy": StrategyInfo(
         "均线金叉+放量突破",
         "5日线上穿20日线，且成交量放大到20日均量的1.5倍",
+        "跌破20日线，或5日线下穿20日线（死叉）",
     ),
-    "TurtleTradeStrategy": (
+    "TurtleTradeStrategy": StrategyInfo(
         "海龟突破新高",
         "突破近20日最高价，成交额超1亿、收阳且真涨",
+        "跌破10日最低价（海龟经典退出）",
     ),
-    "HighTightFlagStrategy": (
+    "HighTightFlagStrategy": StrategyInfo(
         "高位旗形缩量",
         "40日大涨后近10日缩量窄幅横盘，且不跌破高位",
+        "跌破旗形整理下沿，或跌破20日线",
     ),
-    "LimitUpShakeoutStrategy": (
+    "LimitUpShakeoutStrategy": StrategyInfo(
         "涨停次日洗盘",
         "昨日涨停、今日放量收阴但不破昨收，洗盘不破位",
+        "跌破涨停日收盘价（支撑失守）",
     ),
-    "UptrendLimitDownStrategy": (
+    "UptrendLimitDownStrategy": StrategyInfo(
         "上升趋势跌停错杀",
         "20日线上穿60日线走多头，今日放量跌停，博错杀反抽",
+        "反弹回补跌停缺口后离场；跌破60日线止损",
     ),
-    "RpsBreakoutStrategy": (
+    "RpsBreakoutStrategy": StrategyInfo(
         "RPS极强动量",
         "120日涨幅排全市场前10%，且股价接近120日新高",
+        "RPS 跌破 90，或跌破20日线",
     ),
-    "PrivatePlacementStrategy": (
+    "PrivatePlacementStrategy": StrategyInfo(
         "定增公告监控",
         "近7日发布定向增发公告",
+        "无固定卖点（事件驱动，需自行判断）",
     ),
 }
+
+# 正文页脚提示
+_FOOTER = "买卖点为策略信号参考，不构成投资建议"
 
 
 class PushPlusNotifier:
@@ -136,24 +171,61 @@ class PushPlusNotifier:
             webhook_key.lower(), self.settings.pushplus_token
         )
 
-    @staticmethod
-    def _strategy_headline(strategy_name: str, count: int) -> str:
-        """渲染策略标题行：中文名（N 只）｜买点：一句话。
-
-        未在 STRATEGY_DISPLAY 登记的类名原样显示，保证新增策略也不会丢内容。
+    def _format_symbols(self, symbols: Sequence[str], names: Mapping[str, str]) -> str:
+        """把股票代码渲染成雪球链接，每行固定只数，便于在手机上扫读。
 
         Args:
-            strategy_name: 策略类名（如 MaVolumeStrategy）。
-            count: 该策略选出的股票数量。
+            symbols: 股票代码列表。
+            names: {代码: 股票名称} 映射，查不到名称时退回显示带前缀的代码。
 
         Returns:
-            Markdown 标题行。
+            多行 Markdown 文本，行内用 ` · ` 分隔。
         """
-        display = STRATEGY_DISPLAY.get(strategy_name)
-        if not display:
-            return f"**{strategy_name}**（{count} 只）"
-        cn_name, signal = display
-        return f"**{cn_name}**（{count} 只）｜买点：{signal}"
+        links: list[str] = []
+        for code in symbols:
+            xq_code = self._to_xueqiu_code(code)
+            links.append(f"[{names.get(code, xq_code)}](https://xueqiu.com/S/{xq_code})")
+        return "\n".join(
+            " · ".join(links[i : i + _STOCKS_PER_LINE])
+            for i in range(0, len(links), _STOCKS_PER_LINE)
+        )
+
+    def _render_block(
+        self,
+        index: int,
+        strategy_name: str,
+        symbols: Sequence[str],
+        names: Mapping[str, str],
+    ) -> str:
+        """渲染单个策略区块：序号 + 中文名（N 只）/ 买点 / 卖点 / 股票列表。
+
+        未在 STRATEGY_DISPLAY 登记的类名原样显示、不带买卖点，
+        保证以后新增策略也不会丢内容。
+
+        Args:
+            index: 策略序号，从 1 开始（用于前置带圈数字）。
+            strategy_name: 策略类名（如 MaVolumeStrategy）。
+            symbols: 该策略选出的股票代码列表。
+            names: {代码: 股票名称} 映射。
+
+        Returns:
+            该策略的 Markdown 区块。
+        """
+        marker = _CIRCLED[index - 1] if 1 <= index <= len(_CIRCLED) else f"{index}."
+        info = STRATEGY_DISPLAY.get(strategy_name)
+
+        if info is None:
+            title = f"**{marker} {strategy_name}**（{len(symbols)} 只）"
+            rules: list[str] = []
+        else:
+            title = f"**{marker} {info.name}**（{len(symbols)} 只）"
+            rules = [f"🎯 买点：{info.entry}"]
+            if info.exit:
+                rules.append(f"🛑 卖点：{info.exit}")
+
+        return "\n".join(
+            [title, *rules, "", self._format_symbols(symbols, names)]
+        )
 
     # ── 消息构建 ──
 
@@ -163,7 +235,10 @@ class PushPlusNotifier:
         names: dict[str, str],
         data_date: str | None = None,
     ) -> str:
-        """生成汇总消息正文（Markdown），每个策略渲染为一段。
+        """生成汇总消息正文（Markdown），每个策略渲染为一个区块。
+
+        排版目标：一眼看清 —— 头部给时效与规模，每个策略带序号，
+        买点/卖点各占一行，股票列表每行固定只数。
 
         Args:
             items: [(策略名, 选股代码列表), ...]，均为有结果的策略。
@@ -176,31 +251,23 @@ class PushPlusNotifier:
         today = date.today().strftime("%Y-%m-%d")
         total = sum(len(symbols) for _, symbols in items)
 
-        blocks: list[str] = []
-        for strategy_name, symbols in items:
-            links: list[str] = []
-            for code in symbols:
-                xq_code = self._to_xueqiu_code(code)
-                name = names.get(code, xq_code)
-                links.append(f"[{name}](https://xueqiu.com/S/{xq_code})")
-            blocks.append(
-                self._strategy_headline(strategy_name, len(symbols))
-                + "\n"
-                + " ".join(links)
-            )
-
-        # 数据没更新到当天时明确标出，避免把旧数据的结果误当成当天选股
-        date_line = f"**日期：** {today}"
+        # 头部概览：数据时效 + 本次规模
+        head = f"📅 **{today}**"
         if data_date and data_date != today:
-            date_line += f"（⚠️ 数据截止 {data_date}）"
-        date_line += "\n"
+            # 数据没更新到当天时明确标出，避免把旧数据的结果误当成当天选股
+            head += f"（⚠️ 数据截止 {data_date}）"
+        head += f"\n📊 **{len(items)}** 个策略 · 共 **{total}** 只"
+
+        blocks = [
+            self._render_block(index, strategy_name, symbols, names)
+            for index, (strategy_name, symbols) in enumerate(items, start=1)
+        ]
 
         return (
-            date_line
-            + f"**策略数：** {len(items)}\n"
-            + f"**选股合计：** {total} 只\n"
-            + "---\n\n"
-            + "\n\n".join(blocks)
+            head
+            + "\n\n---\n\n"
+            + "\n\n---\n\n".join(blocks)
+            + f"\n\n---\n\n*{_FOOTER}*"
         )
 
     # ── 发送 ──
@@ -288,6 +355,8 @@ class PushPlusNotifier:
 
         for token, items in groups.items():
             content = self._build_digest_content(items, names, data_date)
-            strategy_names = " + ".join(name for name, _ in items)
-            title = f"📈 Sequoia-X 选股播报 | 共 {len(items)} 个策略"
-            self._post(token, title, content, strategy_names)
+            # 日志 tag 保留英文类名便于排查；推送标题用中文概览
+            tag = " + ".join(name for name, _ in items)
+            total = sum(len(symbols) for _, symbols in items)
+            title = f"📈 Sequoia-X 选股播报 · {len(items)} 策略 {total} 只"
+            self._post(token, title, content, tag)
