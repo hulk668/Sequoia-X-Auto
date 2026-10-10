@@ -30,12 +30,10 @@ class HighTightFlagStrategy(BaseStrategy):
         Returns:
             满足条件的股票代码列表。
         """
-        symbols = self.engine.get_local_symbols()
         selected: list[str] = []
 
-        for symbol in symbols:
+        for symbol, df in self.bars_by_symbol().items():
             try:
-                df = self.engine.get_ohlcv(symbol)
                 if len(df) < self._MIN_BARS:
                     continue
 

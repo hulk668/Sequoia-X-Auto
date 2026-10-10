@@ -36,7 +36,7 @@ MAIL_SETTINGS: dict[str, object] = {
     "smtp_port": 465,
     "smtp_user": "bot@example.com",
     "smtp_password": "secret",
-    "mail_to": "16f-4ea62wfy78@dingtalk.com",
+    "mail_to": "ops@example.net",
 }
 
 
@@ -45,7 +45,7 @@ def _notifier(**overrides) -> EmailNotifier:
 
     kwargs = dict(MAIL_SETTINGS)
     kwargs.update(overrides)
-    return EmailNotifier(Settings(_env_file=None, **kwargs))
+    return EmailNotifier(Settings(**kwargs))
 
 
 # 与 test_pushplus.py 用同一份口径的数据：港口航运 3 只、电力 2 只，
@@ -153,7 +153,7 @@ def test_recipients_normalizes_all_separators() -> None:
 def test_single_recipient_is_returned_as_one_item() -> None:
     """单个地址（本次的真实配置）不能被拆成字符。"""
     n = _notifier()
-    assert n._recipients() == ["16f-4ea62wfy78@dingtalk.com"]
+    assert n._recipients() == ["ops@example.net"]
 
 
 def test_sender_falls_back_to_smtp_user() -> None:
@@ -311,7 +311,7 @@ def test_message_is_multipart_alternative_plain_first_then_html() -> None:
 
     assert sent["login"] == ("bot@example.com", "secret")
     assert sent["quit"] is True
-    assert msg["To"] == "16f-4ea62wfy78@dingtalk.com"
+    assert msg["To"] == "ops@example.net"
 
 
 def test_subject_is_rfc2047_encoded_on_the_wire() -> None:
@@ -336,14 +336,14 @@ def test_subject_is_rfc2047_encoded_on_the_wire() -> None:
             pass
 
     n._connect = lambda: FakeConn()  # type: ignore[method-assign]
-    n._send("Sequoia-X 选股播报 · 测试", "<b>h</b>", "t")
+    n._send("SequoiaX-AutoPlus 选股播报 · 测试", "<b>h</b>", "t")
 
     raw = sent["msg"].as_string()
     assert "Subject: =?utf-8?" in raw
 
     line = next(ln for ln in raw.splitlines() if ln.startswith("Subject: "))
     assert str(make_header(decode_header(line[len("Subject: ") :]))) == (
-        "Sequoia-X 选股播报 · 测试"
+        "SequoiaX-AutoPlus 选股播报 · 测试"
     )
 
 
@@ -474,7 +474,7 @@ def test_build_notifier_email_only() -> None:
     from sequoia_x.core.config import Settings
     from sequoia_x.notify import FanOutNotifier, build_notifier
 
-    notifier = build_notifier(Settings(_env_file=None, **MAIL_SETTINGS))
+    notifier = build_notifier(Settings(**MAIL_SETTINGS))
 
     assert isinstance(notifier, FanOutNotifier)
     assert [type(x) for x in notifier._notifiers] == [EmailNotifier]
@@ -485,7 +485,7 @@ def test_build_notifier_none_channel_has_no_backend() -> None:
     from sequoia_x.core.config import Settings
     from sequoia_x.notify import FanOutNotifier, build_notifier
 
-    notifier = build_notifier(Settings(_env_file=None, notify_channel="none"))
+    notifier = build_notifier(Settings(notify_channel="none"))
 
     assert isinstance(notifier, FanOutNotifier)
     assert notifier._notifiers == []

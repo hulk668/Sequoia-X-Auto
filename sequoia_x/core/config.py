@@ -2,13 +2,17 @@
 
 配置来源优先级（高 → 低）：
 
-1. **环境变量 / GitHub Actions Secrets**（CI 主渠道）
+1. **环境变量**（GitHub Actions Secrets 走这条；也方便临时覆盖一两个值）
 2. **config.local.toml**（本地配置文件，已加入 .gitignore，不会被提交）
-3. **.env**（传统方式，已加入 .gitignore）
-4. 代码内默认值
+3. 代码内默认值
 
-本地跑推荐用 `config.local.toml`：`cp config.example.toml config.local.toml` 后填自己的值即可。
-该文件不会被提交，所以 token 不会外泄。
+**本地只需要维护 config.local.toml 一个文件**：
+`cp config.example.toml config.local.toml` 后填自己的值即可。
+它不会被提交，所以 token / 授权码可以放心写在里面。
+
+> 为什么不再支持 `.env`：它加载后是以**环境变量**身份参与配置的，优先级高于
+> `config.local.toml` —— 留一个陈旧的 `.env` 会静默盖掉配置文件里的值，
+> 排查起来很费劲。本地配置收敛到单一文件后这类问题就不存在了。
 """
 
 from pathlib import Path
@@ -82,25 +86,18 @@ class Settings(BaseSettings):
     # 注意：多数邮箱这里要填「客户端授权码」而不是登录密码
     smtp_password: str = ""
     mail_from: str = ""  # 留空则用 smtp_user
-    mail_from_name: str = "Sequoia-X 选股"
+    mail_from_name: str = "SequoiaX-AutoPlus 选股"
     # 收件人，多个用逗号分隔（中英文逗号、分号都能识别）
     mail_to: str = ""
-    # 仅做策略选股、跳过所有数据抓取（baostock 与 akshare 都不跑）
+    # 仅做策略选股、跳过所有数据抓取（不碰 akshare，也不刷新股票名称）
     skip_sync: bool = False
-    # 直接指定用 akshare 更新增量数据，不探测 baostock。
-    # baostock 免费服务长期不稳定，CI 里"先探路再兜底"等于每次都白等一轮。
-    prefer_akshare: bool = False
-    # baostock 可用但查询失败时，是否允许回落到 akshare
-    enable_akshare_fallback: bool = True
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",  # 放行未定义的变量
     )
 
-    @field_validator("skip_sync", "prefer_akshare", "enable_akshare_fallback", mode="before")
+    @field_validator("skip_sync", mode="before")
     @classmethod
     def _blank_bool_is_false(cls, v: object) -> object:
         """把空字符串按 False 处理。
@@ -193,13 +190,12 @@ class Settings(BaseSettings):
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """装配配置源，靠前者覆盖靠后者。
 
-        环境变量 > config.local.toml > .env > 系统 secrets > 默认值。
+        环境变量 > config.local.toml > 系统 secrets > 默认值。
         """
         return (
             init_settings,
             env_settings,
             _LocalConfigSource(settings_cls),
-            dotenv_settings,
             file_secret_settings,
         )
 
@@ -230,7 +226,7 @@ _settings: Settings | None = None
 def get_settings() -> Settings:
     """返回全局 Settings 单例。
 
-    首次调用时按「环境变量 > config.local.toml > .env > 默认值」的顺序加载配置。
+    首次调用时按「环境变量 > config.local.toml > 默认值」的顺序加载配置。
     若没有任何可用的通知通道（邮件参数不全、同时也没有 PUSHPLUS_TOKEN），
     抛出 pydantic_core.ValidationError —— 与其跑完全部策略才在推送阶段失败，
     不如一开始就说清楚缺什么。

@@ -30,15 +30,10 @@ class TurtleTradeStrategy(BaseStrategy):
 
     def run(self) -> list[str]:
         """遍历全市场，返回满足海龟突破条件的股票代码列表（按成交额降序）。"""
-        symbols = self.engine.get_local_symbols()
-        # (代码, 当日成交额)。排序只用库里的数据 —— 不再为了排序去连 baostock：
-        # 免费服务不稳定，为「排序」这种锦上添花的事拖垮整轮不值得，
-        # 而且外部接口取的是 date.today()，和策略判定所用的库内最后交易日可能对不上。
         candidates: list[tuple[str, float]] = []
 
-        for symbol in symbols:
+        for symbol, df in self.bars_by_symbol().items():
             try:
-                df = self.engine.get_ohlcv(symbol)
                 if len(df) < self._MIN_BARS:
                     continue
 

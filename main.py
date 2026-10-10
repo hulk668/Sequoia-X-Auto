@@ -1,23 +1,17 @@
-"""Sequoia-X V2 主程序入口。
+"""SequoiaX-AutoPlus 主程序入口。
 
 运行模式：
-  python main.py                    # 日常模式：增量补数据 + 跑策略 + PushPlus 汇总推送
-  python main.py --prefer-akshare   # 同上，但数据更新直接走 akshare（不探测 baostock）
+  python main.py                    # 日常模式：增量补数据 + 跑策略 + 汇总推送
   python main.py --skip-sync        # 完全不更新数据，直接用库中现有数据选股
   python main.py --backfill         # 补数模式：东财日K拉全市场历史（首次/补池子用）
   python main.py --backfill --limit 200   # 补数试跑：只补前 200 只
-  python main.py --backfill-baostock      # 补数（旧通道）：走 baostock，不推荐
 
-数据源选择：baostock 免费服务长期不稳定，`PREFER_AKSHARE=true`（或 --prefer-akshare）
-可跳过探测、直接用 akshare（东财）更新，并用「锚点 + 比例换算」对齐库中的后复权基准。
-补数同理：baostock 的 `query_history_k_data_plus` 实测会卡死不返回，
-所以 --backfill 默认改走东财日K接口（见 sequoia_x/data/backfill.py）。
+数据源只有一条：**akshare（东方财富源）**。增量更新走 `engine.sync_today_bulk()`，
+它内部用「锚点 + 比例换算」把东财的复权基准对齐到库中的后复权序列。
 """
 
 import argparse
 import sys
-from dotenv import load_dotenv
-load_dotenv()
 
 import socket
 socket.setdefaulttimeout(10.0)
@@ -36,21 +30,16 @@ from sequoia_x.strategy.uptrend_limit_down import UptrendLimitDownStrategy
 from sequoia_x.strategy.rps_breakout import RpsBreakoutStrategy
 from sequoia_x.strategy.private_placement import PrivatePlacementStrategy
 
-# 名称表覆盖率低于该值时，才去 baostock 刷新一次（覆盖率够高就别打扰它）
+# 名称表覆盖率低于该值时，才去刷新一次（覆盖率够高就别白打一次网络请求）
 _NAME_REFRESH_THRESHOLD = 0.95
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sequoia-X V2 选股系统")
+    parser = argparse.ArgumentParser(description="SequoiaX-AutoPlus 选股系统")
     parser.add_argument(
         "--backfill",
         action="store_true",
         help="补数模式：通过东财日K接口拉全市场历史（可中断续跑）",
-    )
-    parser.add_argument(
-        "--backfill-baostock",
-        action="store_true",
-        help="补数模式（旧通道）：走 baostock，接口不稳，仅在东财不可用时使用",
     )
     parser.add_argument(
         "--limit",
@@ -71,14 +60,9 @@ def main() -> None:
         help="配合 --backfill：数据源，auto=东财优先腾讯兜底（默认）",
     )
     parser.add_argument(
-        "--prefer-akshare",
-        action="store_true",
-        help="数据更新直接走 akshare，跳过 baostock 探测（等价于 PREFER_AKSHARE=true）",
-    )
-    parser.add_argument(
         "--skip-sync",
         action="store_true",
-        help="完全不更新数据（baostock 与 akshare 都不跑），直接用库中现有数据选股",
+        help="完全不更新数据，直接用库中现有数据选股",
     )
     args = parser.parse_args()
 
@@ -88,13 +72,9 @@ def main() -> None:
 
         # 2. 初始化日志
         logger = get_logger(__name__)
-        logger.info("Sequoia-X V2 启动")
+        logger.info("SequoiaX-AutoPlus 启动")
 
         # 命令行开关优先于配置文件：只作用于本次运行，不用改配置
-        if args.prefer_akshare and not settings.prefer_akshare:
-            logger.info("命令行指定 --prefer-akshare，本次改用 akshare 更新数据")
-            object.__setattr__(settings, "prefer_akshare", True)
-
         if args.skip_sync and not settings.skip_sync:
             logger.warning("命令行指定 --skip-sync，本次完全不更新数据")
             object.__setattr__(settings, "skip_sync", True)
@@ -102,7 +82,7 @@ def main() -> None:
         # 3. 初始化数据引擎
         engine = DataEngine(settings)
 
-        if args.backfill or args.backfill_baostock:
+        if args.backfill:
             # ── 补数模式：拉全市场历史 K 线，可中断续跑 ──
             logger.info("进入补数模式...")
             all_symbols = load_symbols(engine)
@@ -110,36 +90,31 @@ def main() -> None:
                 all_symbols = all_symbols[: args.limit]
                 logger.info(f"--limit 生效，只补前 {len(all_symbols)} 只（试跑）")
 
-            if args.backfill_baostock:
-                logger.warning("使用旧通道 baostock 补数（接口不稳定，卡死时直接 Ctrl+C 重跑）")
-                engine.backfill(all_symbols)
-            else:
-                backfiller = MarketBackfiller(
-                    engine, settings,
-                    bars=400 if args.bars is None else args.bars,
-                    source=args.source,
-                )
-                stats = backfiller.run(all_symbols)
-                logger.info(f"补数结果：{stats}")
+            backfiller = MarketBackfiller(
+                engine, settings,
+                bars=400 if args.bars is None else args.bars,
+                source=args.source,
+            )
+            stats = backfiller.run(all_symbols)
+            logger.info(f"补数结果：{stats}")
 
             logger.info(f"数据库数据截止日期：{engine.get_latest_date()}")
-            logger.info("Sequoia-X V2 补数模式运行完成")
+            logger.info("SequoiaX-AutoPlus 补数模式运行完成")
             return
 
-        # ── 日常模式：单次 API 补今天 + 策略 + 推送 ──
+        # ── 日常模式：增量补今天 + 策略 + 推送 ──
         if settings.skip_sync:
             logger.warning(
-                "SKIP_SYNC 已开启，完全不更新数据"
-                "（baostock、akshare、名称刷新都不跑），直接基于库中现有数据选股"
+                "SKIP_SYNC 已开启，完全不更新数据（行情与名称刷新都不跑），"
+                "直接基于库中现有数据选股"
             )
         else:
-            source = "akshare" if settings.prefer_akshare else "baostock（不可用则回退 akshare）"
-            logger.info(f"开始拉取最新快照，数据源：{source} ...")
+            logger.info("开始拉取最新快照，数据源：akshare（东方财富源）...")
             count = engine.sync_today_bulk()
             logger.info(f"快照同步完成，写入 {count} 条数据")
 
             # 刷新股票名称（best-effort）：名称存本地 stock_name 表并随数据库缓存持久化，
-            # 覆盖率已经够高就不再打扰 baostock，失败只告警、不影响流程。
+            # 覆盖率已经够高就不再刷新，失败只告警、不影响流程。
             coverage = engine.name_coverage()
             if coverage >= _NAME_REFRESH_THRESHOLD:
                 logger.info(f"股票名称覆盖 {coverage:.0%}，跳过刷新")
@@ -200,7 +175,7 @@ def main() -> None:
                 logger.warning(f"板块信息获取失败，本次推送不含板块：{exc}")
 
         # 7. 汇总推送：同一推送目标上的多个策略合并为一条消息
-        #    名称取自本地 stock_name 表，避免每次推送都依赖 baostock 查询
+        #    名称取自本地 stock_name 表，避免每次推送都去外部查一遍
         notifier.send_digest(
             results,
             engine.get_stock_names(),
@@ -217,7 +192,7 @@ def main() -> None:
             traceback.print_exc()
         sys.exit(1)
 
-    logger.info("Sequoia-X V2 运行完成")
+    logger.info("SequoiaX-AutoPlus 运行完成")
 
 
 if __name__ == "__main__":

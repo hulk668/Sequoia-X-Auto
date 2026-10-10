@@ -24,7 +24,7 @@ def _isolate_config(monkeypatch):
 def _notifier() -> PushPlusNotifier:
     from sequoia_x.core.config import Settings
 
-    return PushPlusNotifier(Settings(pushplus_token="test-token", _env_file=None))
+    return PushPlusNotifier(Settings(pushplus_token="test-token"))
 
 
 def _width(text: str) -> int:

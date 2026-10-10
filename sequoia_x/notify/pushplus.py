@@ -389,5 +389,5 @@ class PushPlusNotifier:
             # 日志 tag 保留英文类名便于排查；推送标题用中文概览
             tag = " + ".join(name for name, _ in items)
             total = sum(len(symbols) for _, symbols in items)
-            title = f"📈 Sequoia-X 选股播报 · {len(items)} 策略 {total} 只"
+            title = f"📈 SequoiaX-AutoPlus 选股播报 · {len(items)} 策略 {total} 只"
             self._post(token, title, content, tag)

@@ -163,3 +163,81 @@ def test_name_coverage() -> None:
             conn.commit()
 
         assert engine.name_coverage() == 0.5
+
+
+# ── 全市场快照（market_panel）：策略取数的唯一入口 ──
+
+
+def _seed_bars(engine: DataEngine, symbol: str, dates: list[str]) -> None:
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.executemany(
+            "INSERT INTO stock_daily (symbol, date, open, high, low, close, volume, turnover) "
+            "VALUES (?, ?, 10, 11, 9, 10.5, 1000, 10500)",
+            [(symbol, d) for d in dates],
+        )
+        conn.commit()
+
+
+def test_market_panel_only_latest_date_and_ascending() -> None:
+    """快照只含「全库最新交易日」当天有行情的代码，且每组按日期升序。
+
+    与 get_local_symbols() 同口径：停牌/退市/漏同步的票最后一行早于大盘，
+    拿它自己的「最后一天」当今日就是在用旧数据选股。
+    """
+    # ignore_cleanup_errors：Windows 上 SQLite 句柄释放有延迟，清理临时目录会偶发
+    # PermissionError，与断言无关。
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        # 600001 跑到 01-03，600002 只到 01-02 → 后者应被排除
+        _seed_bars(engine, "600001", ["2026-01-01", "2026-01-02", "2026-01-03"])
+        _seed_bars(engine, "600002", ["2026-01-01", "2026-01-02"])
+
+        panel = engine.market_panel()
+
+        assert list(panel) == ["600001"]
+        df = panel["600001"]
+        assert list(df["date"]) == ["2026-01-01", "2026-01-02", "2026-01-03"]
+        # 不含 id 与 symbol：symbol 是 dict 的键，重复存一份要多占内存
+        assert list(df.columns) == [
+            "date", "open", "high", "low", "close", "volume", "turnover"
+        ]
+
+
+def test_market_panel_truncates_to_recent_bars() -> None:
+    """只保留最近 N 根（策略最长回看只有 121 根，全历史既慢又占内存）。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        dates = pd.date_range("2025-01-01", periods=200, freq="D").strftime("%Y-%m-%d")
+        _seed_bars(engine, "600519", list(dates))
+
+        panel = engine.market_panel(limit_bars=50)
+
+        df = panel["600519"]
+        assert len(df) == 50
+        # 保留的是**最近** 50 根，而不是最早 50 根
+        assert df["date"].iloc[0] == dates[-50]
+        assert df["date"].iloc[-1] == dates[-1]
+
+
+def test_market_panel_is_cached_and_invalidated_on_write() -> None:
+    """快照要缓存（7 个策略共用一次加载），但**写入新数据后必须作废**。
+
+    否则同一轮里先建快照、再补数据、再跑策略时，策略会读到过期行情。
+    """
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        _seed_bars(engine, "600519", ["2026-01-01", "2026-01-02"])
+
+        first = engine.market_panel()
+        assert engine.market_panel() is first, "第二次调用应直接命中缓存"
+
+        rows = pd.DataFrame([{
+            "symbol": "600519", "date": "2026-01-05",
+            "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.5,
+            "volume": 1000.0, "turnover": 10500.0,
+        }])
+        engine._upsert_daily(rows)
+
+        refreshed = engine.market_panel()
+        assert refreshed is not first, "写入后应重建快照"
+        assert list(refreshed["600519"]["date"])[-1] == "2026-01-05"

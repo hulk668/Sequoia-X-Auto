@@ -135,7 +135,7 @@ class EmailNotifier:
         """邮件主题。放日期与规模，方便在收件箱列表里直接看出内容。"""
         today = date.today().strftime("%Y-%m-%d")
         total = sum(len(symbols) for _, symbols in items)
-        head = f"Sequoia-X 选股播报 · {today}"
+        head = f"SequoiaX-AutoPlus 选股播报 · {today}"
         if data_date and data_date != today:
             head += f"（数据截止 {data_date}）"
         return f"{head} · {len(items)} 策略 {total} 只"
@@ -284,7 +284,7 @@ class EmailNotifier:
             "<!DOCTYPE html>"
             '<html lang="zh-CN"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            "<title>Sequoia-X 选股播报</title></head>"
+            "<title>SequoiaX-AutoPlus 选股播报</title></head>"
             f'<body style="margin:0;padding:0;background-color:{_C_PAGE_BG};'
             f'-webkit-text-size-adjust:100%;">'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
@@ -298,7 +298,7 @@ class EmailNotifier:
             f'<td style="background-color:{_C_HEAD_BG};background-image:linear-gradient('
             f"135deg,{_C_HEAD_BG} 0%,{_C_HEAD_BG2} 100%);padding:24px 28px;\">"
             '<div style="font-size:20px;font-weight:700;color:#ffffff;'
-            'letter-spacing:0.5px;">📈 Sequoia-X 选股播报</div>'
+            'letter-spacing:0.5px;">📈 SequoiaX-AutoPlus 选股播报</div>'
             f'<div style="margin-top:8px;font-size:13px;color:#cbd5e1;">'
             f"{today} · {len(items)} 个策略 · 共 {total} 只{warn}</div>"
             "</td>"
@@ -309,7 +309,7 @@ class EmailNotifier:
             f'<tr><td style="padding:16px 28px 22px;background-color:#fafbfc;'
             f'border-top:1px solid #eef0f3;font-size:12px;line-height:1.8;color:{_C_MUTED};">'
             f"{_esc(FOOTER)}<br>"
-            f"本邮件由 Sequoia-X 自动发送 · 生成于 {stamp}"
+            f"本邮件由 SequoiaX-AutoPlus 自动发送 · 生成于 {stamp}"
             "</td></tr>"
             "</table>"
             "</td></tr></table></body></html>"
@@ -327,7 +327,7 @@ class EmailNotifier:
         """纯文本版本：给不支持 HTML 的客户端兜底。"""
         today = date.today().strftime("%Y-%m-%d")
         total = sum(len(symbols) for _, symbols in items)
-        lines = [f"Sequoia-X 选股播报 · {today}", f"{len(items)} 个策略 · 共 {total} 只"]
+        lines = [f"SequoiaX-AutoPlus 选股播报 · {today}", f"{len(items)} 个策略 · 共 {total} 只"]
         if data_date and data_date != today:
             lines.append(f"⚠️ 数据截止 {data_date}")
         lines.append("")
@@ -385,7 +385,7 @@ class EmailNotifier:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = Header(subject, "utf-8")
         msg["From"] = formataddr(
-            (str(Header(self.settings.mail_from_name or "Sequoia-X 选股", "utf-8")), sender)
+            (str(Header(self.settings.mail_from_name or "SequoiaX-AutoPlus 选股", "utf-8")), sender)
         )
         msg["To"] = ", ".join(recipients)
         msg["Date"] = formatdate(localtime=True)

@@ -1,23 +1,26 @@
 # ─────────────────────────────────────────────────────────────
-# Sequoia-X 本地配置文件模板
+# SequoiaX-AutoPlus 本地配置模板
 #
-# 用法：
-#   cp config.example.toml config.local.toml
-#   然后编辑 config.local.toml，填入你自己的 token。
+# 本地运行只需要动这一个文件：
+#     cp config.example.toml config.local.toml
+#     然后编辑 config.local.toml，填你自己的值
 #
-# config.local.toml 已加入 .gitignore，**不会被提交到仓库**，
-# 所以可以放心写真实 token。
+# config.local.toml 已在 .gitignore 里，**不会被提交到仓库**，
+# 所以可以放心写真实 token / 授权码。
 #
-# 程序只读取 config.local.toml，不会读本文件。
-# ⚠️ 切勿把真实 token 写进本文件（它会被提交、公开可见）。
+# ⚠️ 但本文件（config.example.toml）是会被提交的 —— 切勿把真实值写进这里。
 #
-# 优先级：环境变量 > config.local.toml > .env > 默认值
+# 程序只读 config.local.toml，不读本文件。
+# 配置优先级：环境变量 > config.local.toml > 代码内默认值
+# 完整说明见 README.md 与 RUNNING.md。
 # ─────────────────────────────────────────────────────────────
 
-# 数据库路径（默认：data/sequoia_v2.db）
+# ── 数据 ────────────────────────────────────────────────────
+# SQLite 数据库路径。不放种子的话程序会提示你先跑一次补数：
+#     python main.py --backfill
 db_path = "data/sequoia_v2.db"
 
-# 历史数据起始日期（默认：2024-01-01）
+# 历史数据起始日期。只影响补数（--backfill）拉多久的历史。
 start_date = "2024-01-01"
 
 # ── 通知渠道 ────────────────────────────────────────────────
@@ -25,57 +28,55 @@ start_date = "2024-01-01"
 # email         只发邮件
 # pushplus      只发 PushPlus
 # both          两个都发
-# none          不发通知（只跑数据时用）
+# none          不发通知（只跑数据/只验证策略时用，会跳过通道校验）
+#
+# 校验规则是「至少有一个可用通道」：选 email 就必须把下面邮件那几项配全，
+# 否则程序会在**启动时**直接报错退出 —— 比跑完几千只股票再失败体面得多。
 notify_channel = "auto"
 
 # ── 邮件（推荐通道）─────────────────────────────────────────
-# 为什么改用邮件：PushPlus 正文有 **2 万字上限**，股票池补齐全市场（5000+ 只）
-# 之后很容易超限，服务端直接报 code 999「发送内容过大」。邮件没这个限制，
-# 而且能排版成带样式的 HTML。
+# 为什么推荐邮件：PushPlus 正文有 **2 万字上限**，股票池补齐全市场之后
+# 一轮选股很容易超限，服务端会直接回 code 999「发送内容过大」。
+# 邮件没有这个限制，还能排版成带样式的 HTML。
 #
-# ⚠️ smtp_password 在多数邮箱要填「客户端授权码」，不是登录密码：
-#     QQ 邮箱    smtp.qq.com      465(SSL)  设置→账号与安全→安全设置→开启SMTP→生成授权码
-#     163 邮箱   smtp.163.com     465(SSL)  设置→POP3/SMTP/IMAP→开启→新增授权密码
-#     Gmail     smtp.gmail.com   587(STARTTLS)  需「应用专用密码」
-#     钉钉企业邮箱 smtp.em.dingtalk.com  465(SSL)
-#        · 它和阿里云企业邮箱是同一台服务器（smtp.em.dingtalk.com = smtp.qiye.aliyun.com）
-#        · ⚠️ 两个前置条件缺一不可，否则一定认证失败：
-#          ① 管理员：钉钉管理后台 → 通讯录 → 邮箱管理 → 安全策略 → 第三方客户端管理
-#             （钉钉官方原文：该功能**默认禁用**，管理员不开就没有生成授权码的入口）
-#          ② 用户：邮箱网页端 → 设置 → 账户与安全 → 账户安全 →
-#             三方客户端登录安全管理 → 生成新密码（16 位，只显示一次，需填设备名）
-#        · 「@dingtalk.com」是钉钉免费赠送的**个人邮箱**，官方手册（《钉钉企业邮箱
-#          使用手册》）只覆盖企业邮箱，且它只能用钉钉账号登录、没有独立邮箱密码。
-#          能否用就看上面第 ② 步找不找得到那一项 —— 找不到就是这个账号没开此能力，
-#          换 QQ / 163 发件即可（配置全参数化，不用改代码）。
+# 🔴 注意：大多数邮箱这里要填的是「客户端授权码」，**不是登录密码**。
+#      QQ 邮箱    smtp.qq.com          465(SSL)  设置→账号与安全→开启 SMTP 服务→生成授权码
+#      163 邮箱   smtp.163.com         465(SSL)  设置→POP3/SMTP/IMAP→开启→新增授权密码
+#      阿里企业邮 smtp.qiye.aliyun.com 465(SSL)  网页端设置→客户端设置→生成专用密码
+#      钉钉企业邮 smtp.em.dingtalk.com 465(SSL)  见下方「钉钉特别说明」
+#      Gmail      smtp.gmail.com       587(STARTTLS)  需开启两步验证后申请「应用专用密码」
+#
+#      端口约定：465 → 隐式 SSL（代码自动走 SMTP_SSL）
+#                其余端口 → 先明文连接再用 STARTTLS 升级
+#
+# ── 钉钉 / 阿里云邮箱特别说明 ──
+#   底层就是阿里云邮箱：`smtp.em.dingtalk.com` 与 `smtp.qiye.aliyun.com`
+#   解析到同一台服务器。网上大量教程写的 `smtp.dingtalk.com` **这个域名不存在**。
+#   ⚠️ 两个前置条件缺一不可，否则一定认证失败：
+#     ① 管理员：钉钉管理后台 → 通讯录 → 邮箱管理 → 安全策略 → 第三方客户端管理
+#        （官方手册原文：该功能**默认禁用**，管理员不开就没有生成授权码的入口）
+#     ② 用户：邮箱网页端 → 设置 → 账户与安全 → 账户安全 → 三方客户端登录安全管理
+#        → 生成新密码（16 位，只显示一次，需要填设备名）
+#   「@dingtalk.com」是钉钉免费赠送的**个人邮箱**，官方手册只覆盖企业邮箱；
+#   能不能用就看第 ② 步找不找得到那一项 —— 找不到就换 QQ / 163 发件，
+#   本文件所有参数都是配置项，换服务商不用改代码。
 smtp_host = "smtp.qq.com"
 smtp_port = 465
 smtp_user = "you@qq.com"
-smtp_password = "your-smtp-auth-code"
-mail_from = ""                              # 留空则用 smtp_user
-mail_from_name = "Sequoia-X 选股"
-mail_to = "your-mail@example.com"           # 收件人，多个用逗号分隔
+smtp_password = "your-smtp-auth-code"       # ← 授权码，不是登录密码
+mail_from = ""                              # 留空则自动用 smtp_user
+mail_from_name = "SequoiaX-AutoPlus 选股"
+mail_to = "you@qq.com"                      # 收件人；多个用逗号分隔（中英文逗号、分号都能识别）
 
-# ── PushPlus（可选，仅作备用渠道）───────────────────────────
+# ── PushPlus（可选，作备用渠道）─────────────────────────────
 # 获取地址：https://www.pushplus.plus/push1.html
-# 只有在 notify_channel = "pushplus" / "both"，或 auto 且邮件未配全时才会用到。
+# 只有在 notify_channel = "pushplus" / "both"，
+# 或 auto 且邮件参数没配全时才会用到。
 pushplus_token = ""
 
-# 数据更新通道：是否直接使用 akshare（默认 false）
-# 推荐设成 true —— baostock 免费服务长期不稳定，"先探测再回退"每轮都要白等一次探测
-prefer_akshare = true
-
-# 是否完全不更新数据、只跑策略（默认 false）
-# 打开后不碰 akshare、不碰 baostock、也不刷新股票名称，直接用库里现有数据出结果。
-# 优先级高于 prefer_akshare。
-skip_sync = false
-
-# baostock 探测不通时是否回退 akshare（默认 true）
-# 只在 prefer_akshare = false 时有意义
-enable_akshare_fallback = true
-
-# 策略专属推送 Token（可选）。未配置的策略自动使用上面的全局 pushplus_token。
-# 策略标识见 sequoia_x/strategy/ 下各策略的 webhook_key。
+# ── 策略专属推送 Token（可选）───────────────────────────────
+# 未配置的策略自动使用上面的全局 pushplus_token。
+# 策略标识就是各策略类的 webhook_key，见 sequoia_x/strategy/ 下各文件。
 # [strategy_webhooks]
 # ma_volume = "your-ma-volume-token"
 # turtle = "your-turtle-token"
@@ -84,3 +85,9 @@ enable_akshare_fallback = true
 # limit_down = "your-limit-down-token"
 # rps = "your-rps-token"
 # private_placement = "your-private-placement-token"
+
+# ── 运行开关 ────────────────────────────────────────────────
+# 完全不更新数据，直接用库里现有数据跑策略（默认 false）。
+# 打开后不碰任何网络接口，跑一轮只需几十秒 —— 调策略、看逻辑时用它最合适。
+# 等价于命令行 `python main.py --skip-sync`。
+skip_sync = false

@@ -10,7 +10,7 @@ SMTP 抛出的原始错误翻成人话，直接指出该去改哪里。
     python scripts/test_mail.py --no-send  # 只测到登录为止，不发信
     python scripts/test_mail.py --preview  # 只渲染示例邮件，不联网
 
-配置来源与主程序一致：环境变量 > config.local.toml > .env > 默认值。
+配置来源与主程序一致：环境变量 > config.local.toml > 默认值。
 """
 
 from __future__ import annotations
@@ -134,10 +134,10 @@ def _build_test_message(settings: Settings, notifier: EmailNotifier) -> MIMEMult
     sender = notifier._sender()
     msg = MIMEMultipart("alternative")
     msg["Subject"] = Header(
-        f"Sequoia-X 邮件自检 · {date.today().strftime('%Y-%m-%d')}", "utf-8"
+        f"SequoiaX-AutoPlus 邮件自检 · {date.today().strftime('%Y-%m-%d')}", "utf-8"
     )
     msg["From"] = formataddr(
-        (str(Header(settings.mail_from_name or "Sequoia-X 选股", "utf-8")), sender)
+        (str(Header(settings.mail_from_name or "SequoiaX-AutoPlus 选股", "utf-8")), sender)
     )
     msg["To"] = ", ".join(notifier._recipients())
     msg["Date"] = formatdate(localtime=True)
@@ -147,7 +147,7 @@ def _build_test_message(settings: Settings, notifier: EmailNotifier) -> MIMEMult
     mode = "隐式 SSL" if port == 465 else "STARTTLS"
     msg.attach(
         MIMEText(
-            "这是一封来自 Sequoia-X 的 SMTP 自检邮件。\n\n"
+            "这是一封来自 SequoiaX-AutoPlus 的 SMTP 自检邮件。\n\n"
             f"发件账号：{settings.smtp_user}\n"
             f"服务器：{settings.smtp_host}:{port}（{mode}）\n\n"
             "收到这封邮件说明邮件通知链路已打通，"
@@ -167,7 +167,7 @@ def _close(conn: smtplib.SMTP) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Sequoia-X 邮件通知自检")
+    parser = argparse.ArgumentParser(description="SequoiaX-AutoPlus 邮件通知自检")
     parser.add_argument("--no-send", action="store_true", help="只测连接与登录，不发信")
     parser.add_argument("--preview", action="store_true", help="只渲染示例邮件，不联网")
     args = parser.parse_args()

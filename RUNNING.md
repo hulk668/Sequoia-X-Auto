@@ -8,9 +8,9 @@
 
 | 项 | 要求 |
 |---|---|
-| Python | **>= 3.10**，推荐 **3.11+**（本地配置文件用标准库 `tomllib`，3.10 会退化成只读 `.env`） |
+| Python | **>= 3.11**（本地配置文件用标准库 `tomllib` 读取，3.10 及以下没有这个模块） |
 | 操作系统 | Windows / macOS / Linux 均可 |
-| 网络 | 能访问东方财富（akshare，默认主源）与 baostock（可选备用源） |
+| 网络 | 能访问东方财富接口（akshare，唯一数据源） |
 
 ---
 
@@ -26,7 +26,7 @@ source .venv/bin/activate       # macOS / Linux / Git Bash
 
 # 3) 装依赖
 python -m pip install --upgrade pip
-pip install akshare baostock "pydantic-settings>=2.0" python-dotenv rich pandas requests
+pip install akshare "pydantic-settings>=2.0" rich pandas requests
 ```
 
 > 不要用 `pip install .`：本项目 `pyproject.toml` 没有 `[build-system]`，
@@ -52,20 +52,14 @@ notify_channel = "auto"
 # ── 邮件（推荐）──
 # ⚠️ smtp_password 多数邮箱要填「客户端授权码」，不是登录密码
 smtp_host = "smtp.qq.com"          # 163 → smtp.163.com；钉钉企业邮箱 → smtp.em.dingtalk.com
-smtp_port = 465
+smtp_port = 465                    # 465 → 隐式 SSL；其余端口自动走 STARTTLS
 smtp_user = "you@qq.com"
 smtp_password = "你的授权码"
 mail_from = ""                     # 留空则用 smtp_user
 mail_to = "收件人@example.com"      # 多个用逗号分隔
 
-# 数据更新直接走 akshare，不探测 baostock（推荐：baostock 免费服务不稳定）
-prefer_akshare = true
-
 # 完全不更新数据：跳过抓数据、直接用库里现有数据选股（跑策略调试时用）
 skip_sync = false
-
-# baostock 探测不通时是否允许回退 akshare（prefer_akshare 关掉时才有意义）
-enable_akshare_fallback = true
 ```
 
 > **为什么默认走邮件**：PushPlus 正文有 **2 万字上限**，股票池补齐全市场（5000+ 只）
@@ -94,17 +88,17 @@ python scripts/test_mail.py             # 完整链路：连接 → 登录 → �
 > 临时只想跑策略不需要通知时，把 `notify_channel` 改成 `"none"` 即可。
 
 <details>
-<summary>配置优先级 & 兼容旧方式</summary>
+<summary>配置优先级 & 环境变量覆盖</summary>
 
-优先级从高到低：**环境变量 > `config.local.toml` > `.env` > 默认值**。
+优先级从高到低：**环境变量 > `config.local.toml` > 代码内默认值**。
 
-也就是说你仍可以用 `.env`（`cp .env.example .env`），或者临时用环境变量覆盖：
+配置文件是主入口，环境变量适合临时覆盖：
 
 ```bash
 SMTP_PASSWORD=你的授权码 MAIL_TO=收件人@example.com python main.py
 ```
 
-也可以临时切回 PushPlus：
+也可以临时切到 PushPlus：
 
 ```bash
 PUSHPLUS_TOKEN=xxx NOTIFY_CHANNEL=pushplus python main.py
@@ -120,6 +114,9 @@ turtle = "该策略专属的token"
 策略标识见 `sequoia_x/strategy/*.py` 里的 `webhook_key`：
 `ma_volume` / `turtle` / `flag` / `shakeout` / `limit_down` / `rps` / `private_placement`。
 未配置的策略自动使用全局 `pushplus_token`。
+
+> 早期版本支持 `.env`，**现已移除** —— 它会以环境变量身份参与配置、优先级高于
+> `config.local.toml`，留一个陈旧 `.env` 会静默盖掉配置文件里的值。现在只读这一个文件。
 </details>
 
 ---
@@ -143,12 +140,12 @@ gunzip -c data/seed/sequoia_v2.db.gz > data/sequoia_v2.db
 
 # 没有 gh 也行，直接 curl（公开仓库可匿名下载）
 curl -L -o data/seed/sequoia_v2.db.gz \
-  "https://github.com/hulk668/Sequoia-X-Auto/releases/download/$TAG/sequoia_v2.db.gz"
+  "https://github.com/hulk668/SequoiaX-AutoPlus/releases/download/$TAG/sequoia_v2.db.gz"
 gunzip -c data/seed/sequoia_v2.db.gz > data/sequoia_v2.db
 ```
 
 最省事的办法是直接到浏览器打开
-<https://github.com/hulk668/Sequoia-X-Auto/releases>，找到 `data/seed/VERSION` 里写的那个 tag，
+<https://github.com/hulk668/SequoiaX-AutoPlus/releases>，找到 `data/seed/VERSION` 里写的那个 tag，
 下载 `sequoia_v2.db.gz`，用 7-Zip / WSL 解压到 `data/sequoia_v2.db`。
 
 **C. 补数（把库里没有的股票一次灌满）**
@@ -165,7 +162,7 @@ python main.py --backfill --bars 250 --source qq
 ```
 
 补数走两条 HTTP 通道（东财 `push2his` → 腾讯 `web.ifzq.gtimg.cn`），
-**不依赖 baostock**（它的历史 K 线接口实测会卡死不返回）。任务可中断续跑：
+与日常增量用的 akshare 相互独立。任务可中断续跑：
 中途 Ctrl+C 后重跑会自动跳过已完成的股票。
 
 > 种子里的数据截止日期见 [data/seed/README.md](data/seed/README.md)。
@@ -179,9 +176,9 @@ python main.py --backfill --bars 250 --source qq
 python main.py
 ```
 
-做的事：增量同步最新行情 → 刷新股票名称 → 跑全部策略 → 反查板块 → **汇总成一条** PushPlus 推送。
+做的事：增量同步最新行情 → 刷新股票名称 → 跑全部策略 → 反查板块 → **汇总成一条**消息推送。
 
-再看看不更新数据、直接用库里现有数据选股：
+再看**不更新数据**、直接用库里现有数据选股（调策略时最常用）：
 
 ```bash
 python main.py --skip-sync
@@ -194,58 +191,45 @@ python main.py --skip-sync
 执行策略：MaVolumeStrategy
 MaVolumeStrategy 选出 24 只股票
 ...
-PushPlus 推送成功 [MaVolumeStrategy + TurtleTradeStrategy + ...]
 ```
 
-数据更新通道的优先级：
+数据更新的两种状态：
 
 | 配置 | 行为 |
 |---|---|
-| `PREFER_AKSHARE=true`（推荐） | **直接走 akshare**，跳过 baostock 探测 |
-| 默认（不设） | 先探测 baostock：可达 → 8 进程并行拉取；不可达 → 回退 akshare（`enable_akshare_fallback=false` 时则跳过同步） |
-| `SKIP_SYNC=true` | 完全不更新数据，基于库中现有数据选股，推送里标注 `⚠️ 数据截止 YYYY-MM-DD` |
+| 默认 | 走 akshare（东方财富源）拉增量，按「锚点 + 比例换算」对齐到库中的后复权序列 |
+| `skip_sync = true` | **完全不更新数据**，基于库中现有数据选股，推送里标注 `⚠️ 数据截止 YYYY-MM-DD` |
 
-无论走哪条通道，akshare 拿到的数据都会按「锚点 + 比例换算」对齐到库中的后复权序列
-（换算公式见 [README](README.md) 的「数据更新」一节）。
+换算公式见 [README](README.md) 的「数据更新」一节。数据源只有 akshare 这一条，没有可切换的备用通道。
 
 ---
 
-## 5. 数据更新的三种方式 / 常用参数
+## 5. 常用参数
 
-### 5.1 换数据源：用 akshare（推荐）
-
-`baostock` 免费服务长期不稳定（同一天可能通、也可能不通），本地推荐直接指定 akshare：
-
-| 方式 | 命令 / 配置 | 适用场景 |
-|---|---|---|
-| **命令行开关**（最省事） | `python main.py --prefer-akshare` | 临时跑一次，不动配置文件 |
-| **环境变量** | Git Bash / macOS / Linux：`PREFER_AKSHARE=true python main.py`<br>Windows cmd：`set PREFER_AKSHARE=true && python main.py`<br>PowerShell：`$env:PREFER_AKSHARE="true"; python main.py` | 临时跑，或写进脚本 |
-| **配置文件** | `config.local.toml` 里 `prefer_akshare = true` | 长期生效，每次跑都走 akshare |
-
-### 5.2 完全不更新数据：`skip_sync`
+### 5.1 完全不更新数据：`skip_sync`
 
 三种方式，任选其一（效果相同）：
 
 | 方式 | 命令 / 配置 |
 |---|---|
-| **命令行开关** | `python main.py --skip-sync` |
+| **命令行开关**（最省事） | `python main.py --skip-sync` |
 | **环境变量** | `SKIP_SYNC=1 python main.py`（PowerShell：`$env:SKIP_SYNC="1"; python main.py`） |
 | **配置文件** | `config.local.toml` 里 `skip_sync = true` |
 
 > ⚠️ 用配置文件方式记得**改回 `false`**，否则会一直跳过更新、数据停在旧日期。
 > 命令行开关只作用于当次运行，不会写回文件。
 
-`skip_sync` 优先级高于 `prefer_akshare`：同时打开时**不更新任何数据**。
-跳过更新后：不碰 akshare、不碰 baostock、不刷新股票名称，只读本地数据库跑策略。
+跳过更新后：不碰任何网络接口（行情与名称刷新都不跑），只读本地数据库跑策略。
 推送消息里的日期会是**数据的真实截止日**，例如 `📅 **2026-10-10**（⚠️ 数据截止 2026-10-09）`。
 
-### 5.3 其它参数
+### 5.2 其它参数
 
 | 场景 | 做法 |
 |---|---|
-| 关闭 akshare 回退 | `config.local.toml` 里 `enable_akshare_fallback = false` |
 | 换数据库位置 | `config.local.toml` 里改 `db_path` |
 | 补齐股票池 | `python main.py --backfill`（东财→腾讯，可中断续跑） |
+| 只想补前几只试跑 | `python main.py --backfill --limit 100` |
+| 指定保留根数 / 数据源 | `python main.py --backfill --bars 250 --source qq` |
 | 跑测试 | `pip install pytest hypothesis pytest-mock` 后 `pytest` |
 
 ---
@@ -299,7 +283,7 @@ PushPlus 正文上限 2 万字，股票池补齐全市场后容易触顶。改�
 本地按第 3 步从 Release 下载种子解压。
 Actions 上会自动从 **GitHub Release** 下载种子（tag 取自 `data/seed/VERSION`）——
 跑到这一步说明缓存和 Release 都没取到，检查 `data/seed/VERSION` 里写的那个 tag
-在 <https://github.com/hulk668/Sequoia-X-Auto/releases> 上是否存在、资产是否还在。
+在 <https://github.com/hulk668/SequoiaX-AutoPlus/releases> 上是否存在、资产是否还在。
 
 **Q：`config.local.toml` 会不会不小心提交？**
 不会，已在 `.gitignore`。可用 `git check-ignore -v config.local.toml` 自查。

@@ -38,7 +38,7 @@ def test_env_overrides_default(db_path: str, monkeypatch) -> None:
 
     from sequoia_x.core.config import Settings
 
-    s = Settings(_env_file=None)
+    s = Settings()
     assert s.db_path == db_path
 
 
@@ -50,7 +50,7 @@ def test_missing_required_field_raises(monkeypatch) -> None:
     monkeypatch.delenv("PUSHPLUS_TOKEN", raising=False)
 
     with pytest.raises(ValidationError) as exc_info:
-        Settings(_env_file=None)
+        Settings()
     assert "pushplus_token" in str(exc_info.value).lower()
 
 
@@ -61,7 +61,7 @@ def test_blank_token_raises(monkeypatch) -> None:
     monkeypatch.setenv("PUSHPLUS_TOKEN", "   ")
 
     with pytest.raises(ValidationError) as exc_info:
-        Settings(_env_file=None)
+        Settings()
     assert "pushplus_token" in str(exc_info.value).lower()
 
 
@@ -71,13 +71,9 @@ def test_blank_bool_is_false(monkeypatch) -> None:
 
     monkeypatch.setenv("PUSHPLUS_TOKEN", "test-token")
     monkeypatch.setenv("SKIP_SYNC", "")
-    monkeypatch.setenv("PREFER_AKSHARE", "")
-    monkeypatch.setenv("ENABLE_AKSHARE_FALLBACK", "")
 
-    s = Settings(_env_file=None)
+    s = Settings()
     assert s.skip_sync is False
-    assert s.prefer_akshare is False
-    assert s.enable_akshare_fallback is False
 
 
 def test_blank_strategy_webhook_env_ignored(monkeypatch) -> None:
@@ -87,5 +83,5 @@ def test_blank_strategy_webhook_env_ignored(monkeypatch) -> None:
     monkeypatch.setenv("PUSHPLUS_TOKEN", "test-token")
     monkeypatch.setenv("STRATEGY_WEBHOOK_RPS", "")
 
-    s = Settings(_env_file=None, strategy_webhooks={"rps": "from-config"})
+    s = Settings(strategy_webhooks={"rps": "from-config"})
     assert s.strategy_webhooks == {"rps": "from-config"}

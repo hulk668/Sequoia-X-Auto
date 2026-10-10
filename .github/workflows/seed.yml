@@ -1,4 +1,4 @@
-name: Sequoia-X 发布数据库种子
+name: SequoiaX-AutoPlus 发布数据库种子
 
 # ── 用途 ──────────────────────────────────────────────────
 # 把「当前最新的数据库」打包成 gzip 种子，发布到 GitHub Release，
@@ -41,7 +41,7 @@ on:
 
 # 与 daily 共用同一个并发组：两边都会写数据库缓存，串行更安全
 concurrency:
-  group: sequoia-x
+  group: sequoiax-autoplus
   cancel-in-progress: false
 
 permissions:
@@ -122,7 +122,7 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install akshare baostock "pydantic-settings>=2.0" python-dotenv rich pandas requests
+          pip install akshare "pydantic-settings>=2.0" rich pandas requests
 
       - name: 确认数据库可用（必要时补数）
         run: |
@@ -206,7 +206,7 @@ jobs:
           #    GitHub 会扫描整段 run 文本、连注释一起解析，写到一对空定界符会被判定为
           #    「An expression was expected」，整个 workflow 文件直接非法、无法运行。
           NOTES=$(cat <<'EOF'
-          Sequoia-X 数据库冷启动种子。
+          SequoiaX-AutoPlus 数据库冷启动种子。
 
           - 覆盖：${{ steps.pack.outputs.SEED_SYMBOLS }} 只 / ${{ steps.pack.outputs.SEED_ROWS }} 行
           - 体积：${{ steps.pack.outputs.SEED_BYTES }} 字节（gzip -9，解压后 ${{ steps.pack.outputs.SEED_SLIM_BYTES }} 字节）

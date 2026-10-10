@@ -1,4 +1,4 @@
-name: Sequoia-X 每日选股
+name: SequoiaX-AutoPlus 每日选股
 
 # ── 触发方式 ──────────────────────────────────────────────
 # 1) 定时：每周一至周五 10:30 UTC（= 北京时间 18:30，收盘后）
@@ -10,10 +10,6 @@ on:
     - cron: '30 10 * * 1-5'
   workflow_dispatch:
     inputs:
-      prefer_akshare:
-        description: '用 akshare 更新数据（默认开；关掉则改试 baostock）'
-        type: boolean
-        default: true
       skip_sync:
         description: '完全不更新数据，直接用库中现有数据跑策略'
         type: boolean
@@ -21,7 +17,7 @@ on:
 
 # 同一时间只跑一个实例，避免两次触发并发写坏数据库
 concurrency:
-  group: sequoia-x
+  group: sequoiax-autoplus
   cancel-in-progress: false
 
 permissions:
@@ -46,7 +42,7 @@ jobs:
       SMTP_PORT: ${{ secrets.SMTP_PORT || '465' }}
       SMTP_USER: ${{ secrets.SMTP_USER }}
       SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-      MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME || 'Sequoia-X 选股' }}
+      MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME || 'SequoiaX-AutoPlus 选股' }}
       MAIL_TO: ${{ secrets.MAIL_TO }}
       # ── 备用：PushPlus 全局 Token（配了就会随渠道设置一起生效）──
       PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
@@ -61,9 +57,6 @@ jobs:
       # 手动触发时可勾选跳过数据更新；定时触发下该 input 为空字符串，
       # 配置层会把空串按 False 处理（见 Settings._blank_bool_is_false）
       SKIP_SYNC: ${{ github.event.inputs.skip_sync }}
-      # 数据更新默认走 akshare（baostock 免费服务长期不稳定，先探路再兜底等于白等）。
-      # 手动触发时取勾选值；定时触发下 input 为空，回落到 'true'。
-      PREFER_AKSHARE: ${{ github.event.inputs.prefer_akshare || 'true' }}
       # ── 冷启动种子（详见 data/seed/README.md）──
       SEED_BARS: '400'                 # 降级补数时每只票保留的 K 线根数
       SEED_FALLBACK_BACKFILL: 'true'   # 取不到 Release 种子时，是否降级为自行补数
@@ -78,7 +71,7 @@ jobs:
 
       # 防止把真实 token 误提交进仓库（仓库是公开的）。
       # PushPlus 的 token 是 32 位十六进制串，正常代码/文档里不应出现这种形态；
-      # \b 边界保证不会误伤 uv.lock 里 64 位的 sha256。
+      # \b 边界保证不会误伤锁文件里 64 位的 sha256。
       - name: 检查是否误提交密钥
         run: |
           hits=$(git grep -nIE '\b[0-9a-fA-F]{32}\b' -- . ':(exclude)data/seed' || true)
@@ -148,7 +141,7 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install akshare baostock "pydantic-settings>=2.0" python-dotenv rich pandas requests
+          pip install akshare "pydantic-settings>=2.0" rich pandas requests
 
       # 数据库 300MB+，远超 GitHub 单文件 100MB 限制，因此用滚动缓存持久化：
       # restore-keys 命中最近一次，key 用 run_id 保证每轮都保存新副本。
@@ -208,7 +201,7 @@ jobs:
           echo "::warning::无法从 Release '$TAG' 取得可用种子。排查方向："
           echo "::warning::  1) 该 tag 的 Release 是否已创建？见 ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases"
           echo "::warning::  2) data/seed/VERSION 里的 tag 是否写错（当前值：$TAG）？"
-          echo "::warning::  3) 想重建种子：手动触发「Sequoia-X 发布数据库种子」工作流。"
+          echo "::warning::  3) 想重建种子：手动触发「SequoiaX-AutoPlus 发布数据库种子」工作流。"
           echo "::warning::  4) 种子的股票数是否不足 ${MIN_SYMBOLS} 只？（残缺种子会被拒绝，见 data/seed/README.md）"
 
           if [ "${SEED_FALLBACK_BACKFILL}" != "true" ]; then
@@ -218,7 +211,7 @@ jobs:
 
           echo "降级：自行补数建立数据库（东财日K → 腾讯兜底）……"
           if ! python main.py --backfill --bars "${SEED_BARS}"; then
-            echo "::error::降级补数也失败了。请手动触发「Sequoia-X 发布数据库种子」工作流建好 Release 后重跑。"
+            echo "::error::降级补数也失败了。请手动触发「SequoiaX-AutoPlus 发布数据库种子」工作流建好 Release 后重跑。"
             exit 1
           fi
           echo "降级补数完成：$(du -h data/sequoia_v2.db | cut -f1)"

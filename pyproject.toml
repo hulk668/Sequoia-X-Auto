@@ -1,12 +1,11 @@
 [project]
-name = "sequoia-x"
-version = "2.0.0"
-requires-python = ">=3.10"
+name = "sequoiax-autoplus"
+version = "3.0.0"
+description = "A 股量化选股系统：7 个确定性策略 + 邮件 / PushPlus 推送，可跑在 GitHub Actions 上"
+requires-python = ">=3.11"
 dependencies = [
     "akshare>=1.10",
-    "baostock>=0.9",
     "pydantic-settings>=2.0",
-    "python-dotenv>=1.0",
     "rich>=13.0",
     "pandas>=2.0",
     "requests>=2.31",
@@ -22,6 +21,8 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]

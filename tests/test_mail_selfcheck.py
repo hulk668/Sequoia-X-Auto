@@ -36,14 +36,14 @@ def _settings(**overrides):
 
     kwargs = {
         "notify_channel": "email",
-        "smtp_host": "smtp.111.com",
+        "smtp_host": "smtp.example.com",
         "smtp_port": 465,
         "smtp_user": "noreply@example.com",
         "smtp_password": "auth-code-1234",
         "mail_to": "noreply@example.com,ops@example.net",
     }
     kwargs.update(overrides)
-    return Settings(_env_file=None, **kwargs)
+    return Settings(**kwargs)
 
 
 # ── 密码脱敏 ──
@@ -118,7 +118,7 @@ def test_test_message_is_alternative_with_readable_headers() -> None:
 
     body = msg.get_payload()[0].get_payload(decode=True).decode("utf-8")
     assert "自检" in body
-    assert "smtp.111.com:465" in body
+    assert "smtp.example.com:465" in body
 
     # 多个收件人都要出现在 To 里（用解析而不是字符串比对，别被分隔符空格绊倒）
     assert [addr for _name, addr in getaddresses([msg["To"]])] == [

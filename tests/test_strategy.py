@@ -35,22 +35,28 @@ def test_strategy_run_returns_list_of_str(symbols: list[str]) -> None:
         )
         engine = DataEngine(settings)
 
-        with patch.object(engine, "get_all_symbols", return_value=symbols):
-            with patch.object(engine, "get_ohlcv", return_value=pd.DataFrame()):
-                strategy = MaVolumeStrategy(engine=engine, settings=settings)
-                result = strategy.run()
+        # 策略统一通过 market_panel() 取全市场快照，这里把它换成受控的桩数据
+        with patch.object(
+            engine, "market_panel", return_value={s: pd.DataFrame() for s in symbols}
+        ):
+            strategy = MaVolumeStrategy(engine=engine, settings=settings)
+            result = strategy.run()
 
     assert isinstance(result, list)
     assert all(isinstance(s, str) and len(s) > 0 for s in result)
 
 
 class _FakeEngine:
-    """最小引擎替身：只提供策略真正会调用的两个方法。"""
+    """最小引擎替身：只提供策略真正会调用的一两个方法。"""
 
     db_path = ":memory:"
 
     def __init__(self, data: dict[str, pd.DataFrame]) -> None:
         self._data = data
+
+    def market_panel(self) -> dict[str, pd.DataFrame]:
+        """策略统一走这里取数（真实引擎会一次加载全市场并缓存）。"""
+        return self._data
 
     def get_local_symbols(self) -> list[str]:
         return list(self._data)
@@ -60,7 +66,7 @@ class _FakeEngine:
 
 
 def _settings() -> Settings:
-    return Settings(pushplus_token="test-token", _env_file=None)
+    return Settings(pushplus_token="test-token")
 
 
 def _make_df(rows: list[dict]) -> pd.DataFrame:
@@ -128,16 +134,16 @@ def test_private_placement_survives_upstream_schema_change(monkeypatch) -> None:
     assert strategy.run() == []
 
 
-def test_turtle_sorts_by_turnover_without_baostock() -> None:
-    """海龟排序只用库内成交额，且绝不依赖 baostock。
+def test_turtle_sorts_by_turnover_from_local_data() -> None:
+    """海龟排序只用库内成交额，绝不依赖外部接口。
 
-    历史教训：原来的实现会调 baostock 取流通市值来排序，免费服务一挂整轮就白跑；
+    历史教训：原来的实现会调外部接口取流通市值来排序，服务一挂整轮就白跑；
     而且外部接口取的是 date.today()，与策略判定所用的库内最后交易日可能对不上。
     现在改成按当日 turnover 降序，数据全来自本地库。
     """
     from sequoia_x.strategy.turtle_trade import TurtleTradeStrategy
 
-    # 排序一旦退回 baostock，这个方法名下就会重新出现 _get_market_caps
+    # 排序一旦退回外部接口取市值，这个方法名下就会重新出现 _get_market_caps
     assert not hasattr(TurtleTradeStrategy, "_get_market_caps")
 
     def _breakout_df(turnover: float) -> pd.DataFrame:
@@ -158,3 +164,66 @@ def test_turtle_sorts_by_turnover_without_baostock() -> None:
 
     assert strategy.run() == ["600001", "600002", "600000"]
 
+
+
+# ── 全市场快照：共享取数与不变量 ──
+
+
+def test_panel_bars_covers_every_strategy() -> None:
+    """🔴 快照的截断长度必须 ≥ 每个策略的最小 K 线根数。
+
+    快照是按「每只最近 N 根」截断的（`DataEngine.market_panel`）。如果某个策略
+    需要的回看比 N 还长，窗口就算不满 → 条件恒不成立 → **静默少选票**，
+    而且不会报任何错。这条测试就是那道闸门：加新策略（回看更长）时会直接失败，
+    提醒把 engine._PANEL_BARS 调大。
+    """
+    from sequoia_x.data.engine import _PANEL_BARS
+    from sequoia_x.strategy.high_tight_flag import HighTightFlagStrategy
+    from sequoia_x.strategy.limit_up_shakeout import LimitUpShakeoutStrategy
+    from sequoia_x.strategy.ma_volume import MaVolumeStrategy
+    from sequoia_x.strategy.rps_breakout import RpsBreakoutStrategy
+    from sequoia_x.strategy.turtle_trade import TurtleTradeStrategy
+    from sequoia_x.strategy.uptrend_limit_down import UptrendLimitDownStrategy
+
+    strategies = [
+        MaVolumeStrategy, TurtleTradeStrategy, HighTightFlagStrategy,
+        LimitUpShakeoutStrategy, UptrendLimitDownStrategy, RpsBreakoutStrategy,
+    ]
+    for cls in strategies:
+        assert cls._MIN_BARS <= _PANEL_BARS, (
+            f"{cls.__name__} 需要 {cls._MIN_BARS} 根，但快照只保留 {_PANEL_BARS} 根 —— "
+            f"请调大 sequoia_x/data/engine.py 里的 _PANEL_BARS"
+        )
+
+
+def test_rps_is_not_a_per_symbol_lookback_but_reuses_panel() -> None:
+    """RPS 是横截面策略，但同样复用共享快照 —— 不再自己整表读一遍。
+
+    校验两件事：
+    1. 它只依赖 `market_panel()`（下面用的是没有任何数据库能力的替身引擎）；
+    2. 排名口径正确：只有 120 日涨幅进前 10% 的票入选。
+    """
+    from sequoia_x.strategy.rps_breakout import RpsBreakoutStrategy
+
+    bars = 130  # > _MIN_BARS(121)
+
+    def _ramp(symbol: str, rate: int) -> pd.DataFrame:
+        """单调上涨的 130 根 K 线：close[t] = 10 + rate*t，high 取同值。
+
+        high 与 close 相同 → 末行的 120 日最高价就是最后一根，
+        所以「接近新高」这条恒成立，能把断言聚焦在 RPS 排名上。
+        """
+        dates = pd.date_range("2026-01-01", periods=bars, freq="D").strftime("%Y-%m-%d")
+        closes = [10.0 + rate * t for t in range(bars)]
+        return pd.DataFrame([
+            {"symbol": symbol, "date": d, "open": c, "high": c, "low": c,
+             "close": c, "volume": 1_000_000.0, "turnover": c * 1_000_000.0}
+            for d, c in zip(dates, closes)
+        ])
+
+    # 10 只票，涨幅严格递增；代码按字符串升序（与真实引擎 ORDER BY symbol 一致）
+    data = {f"6000{i:02d}": _ramp(f"6000{i:02d}", rate=i) for i in range(1, 11)}
+    strategy = RpsBreakoutStrategy(engine=_FakeEngine(data), settings=_settings())
+
+    # 10 个样本里 rank(pct=True) >= 0.9 只命中第 9、10 名 → 涨幅最大的两只
+    assert strategy.run() == ["600009", "600010"]

@@ -1,6 +1,13 @@
-"""数据引擎模块：负责 SQLite 行情数据存储与 baostock 增量同步。"""
+"""数据引擎模块：负责 SQLite 行情数据存储与 akshare 增量同步。
+
+行情与股票清单都只有一个数据源：**akshare（东方财富源）**。
+早期还有一条 baostock 通道，因为它的免费服务长期不稳定（同一天可能通、
+也可能不通，`query_history_k_data_plus` 还会卡死不返回），已整体移除 ——
+少一条通道就少一层「两条通道复权基准不同」的对齐负担。
+"""
 
 import sqlite3
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -69,6 +76,21 @@ _AK_HTTP_TIMEOUT = 20
 # 进度日志间隔：每完成这么多只打一行，避免长跑时日志看起来像卡死
 _AK_PROGRESS_EVERY = 500
 
+# 一次加载给策略用的 K 线根数（每个代码只保留最近 N 根）。
+#
+# 这个值是**硬下限的推导结果**，不是随手取的：最长的回看来自 RPS 策略 ——
+#   `shift(120)` 要取到 120 根之前那一天 → 至少 121 根
+#   `rolling(120)` 在末行要吃到前 120 根 → 也是 120 根
+# 其余策略最多只要 61 根（20/60 日均线）。所以 121 是下限，这里取 130 留一点余量。
+#
+# 🔴 截断长度**必须 ≥ 任何策略的 `_MIN_BARS`**，否则窗口算不满 → 条件恒不成立
+#    → 静默少选票（最难查的那类 bug）。tests/test_strategy.py 里有测试守着这个不变量，
+#    加新策略（回看更长）时会直接失败提醒你调大这个值。
+_PANEL_BARS = 130
+
+# 快照里带的列（不含 id）。symbol 不进列 —— 它是 dict 的键，重复存一遍要多占内存。
+_PANEL_COLUMNS = "date,open,high,low,close,volume,turnover"
+
 _REQUESTS_TIMEOUT_PATCHED = False
 
 
@@ -107,28 +129,6 @@ def _ensure_request_timeout() -> None:
 _EM_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 _EM_ORGINFO_REPORT = "RPT_F10_BASIC_ORGINFO"
 _EM_BATCH_SIZE = 45
-
-
-def _bs_fetch_batch(tasks: list) -> list:
-    """多进程 worker：独立 login，批量拉取 baostock 数据。"""
-    import baostock as bs
-    bs.login()
-    results = []
-    for symbol, bs_code, start, end in tasks:
-        rs = bs.query_history_k_data_plus(
-            bs_code,
-            "date,open,high,low,close,volume,amount",
-            start_date=start,
-            end_date=end,
-            frequency="d",
-            adjustflag="1",  # 后复权
-        )
-        if rs.error_code != "0":
-            continue
-        while rs.next():
-            results.append([symbol] + rs.get_row_data())
-    bs.logout()
-    return results
 
 
 def _ak_fetch_one(task: tuple[str, str, str]) -> list[list]:
@@ -265,76 +265,66 @@ def _em_fetch_boards(symbols: list[str]) -> dict[str, str]:
     return found
 
 
-def _probe_baostock() -> tuple[bool, str]:
-    """探测 baostock 行情接口是否真的可用（拿一只样本股做最小查询）。
+def _ak_fetch_symbol_names() -> list[tuple[str, str]]:
+    """拉全市场 A 股代码与名称，返回 [(代码, 名称), ...]。
 
-    为什么需要探测：baostock 内部用裸 print() 直接往 stdout 吐错误
-    （见 baostock/util/socketutil.py 的"服务器连接失败/接收数据异常"），
-    不走 logging，没法用日志级别屏蔽。一旦接口在 CI 环境不可达，
-    8 个 worker 会刷出上百行噪音，还白等一两分钟。
+    用 akshare 的 `stock_info_a_code_name()`（一次请求拿全市场），
+    而不是逐只查询 —— 逐只在请求量上来后会开始返回空结果（CI 环境尤其明显），
+    导致大量股票只能显示代码。
 
-    这里先在主进程用一次最小查询探路，不可用就切 akshare 兜底 ——
-    既不刷屏，也省掉拉起进程池的开销。
+    列名做**防御性识别**：优先按 `code`/`name` 取，取不到就退化为
+    「按列位置取前两列」。上游改列名时返回空列表而不是抛异常，
+    由调用方沿用已有数据。
 
     Returns:
-        (是否可用, 失败原因)。可用时原因为空字符串。
+        [(代码, 名称), ...]；失败或结果为空时返回 []。
     """
-    import contextlib
-    import io
-    from datetime import date, timedelta
-
-    import baostock as bs
-
-    end = date.today().strftime("%Y-%m-%d")
-    start = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
-
-    buf = io.StringIO()
-    reason = ""
     try:
-        # 把 baostock 的 stdout 收进来，稍后压成一行诊断信息
-        with contextlib.redirect_stdout(buf):
-            lg = bs.login()
-            if lg.error_code != "0":
-                reason = f"登录失败：{lg.error_msg}"
-            else:
-                try:
-                    rs = bs.query_history_k_data_plus(
-                        "sh.600000",
-                        "date,close",
-                        start_date=start,
-                        end_date=end,
-                        frequency="d",
-                        adjustflag="1",
-                    )
-                    if rs.error_code != "0":
-                        reason = f"查询返回错误：{rs.error_msg}"
-                    else:
-                        rs.next()  # 必须真正取一次，才会触发实际的数据传输
-                finally:
-                    bs.logout()
-    except Exception as exc:
-        reason = f"{type(exc).__name__}: {exc}"
+        import akshare as ak
 
-    if not reason:
-        return True, ""
+        df = ak.stock_info_a_code_name()
+    except Exception as exc:  # noqa: BLE001 - 取不到就沿用已有数据
+        logger.warning(f"获取股票清单失败：{type(exc).__name__}: {exc}")
+        return []
 
-    noise = [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
-    detail = next((ln for ln in noise if "success" not in ln.lower()), "")
-    if detail:
-        reason = f"{reason}｜baostock 输出：{detail}"
-    return False, reason
+    if df is None or len(df) == 0:
+        logger.warning("股票清单为空，沿用已有数据")
+        return []
+
+    # 列名可能是 code/name（小写）、证券代码/证券简称等，按小写名匹配
+    lower = {str(c).strip().lower(): c for c in df.columns}
+    code_col = next(
+        (lower[k] for k in ("code", "symbol", "证券代码", "股票代码") if k in lower), None
+    )
+    name_col = next(
+        (lower[k] for k in ("name", "证券简称", "股票简称", "名称") if k in lower), None
+    )
+    if code_col is None or name_col is None:
+        if len(df.columns) < 2:
+            logger.warning(f"股票清单列名无法识别（现有列：{list(df.columns)}）")
+            return []
+        code_col, name_col = df.columns[0], df.columns[1]
+
+    out: list[tuple[str, str]] = []
+    for code, name in zip(df[code_col].astype(str), df[name_col].astype(str)):
+        # 上游可能带 sh/sz/bj 前缀，统一剥成 6 位纯数字
+        digits = "".join(ch for ch in code if ch.isdigit())
+        symbol = digits[-6:] if len(digits) >= 6 else ""
+        clean = name.strip()
+        if symbol and clean and clean.lower() != "nan":
+            out.append((symbol, clean))
+    return out
 
 
 class DataEngine:
-    """行情数据引擎，负责 SQLite 存储和 baostock 数据同步。"""
+    """行情数据引擎：SQLite 存储 + akshare 数据同步。"""
 
     def __init__(self, settings: Settings) -> None:
         self.db_path: str = settings.db_path
         self.start_date: str = settings.start_date
-        # 直接指定 akshare 作为数据源（不探测 baostock）
-        self.prefer_akshare: bool = settings.prefer_akshare
-        # baostock 探测不通时是否允许回落到 akshare
-        self.enable_akshare_fallback: bool = settings.enable_akshare_fallback
+        # 全市场 K 线快照缓存（惰性构建）。见 market_panel()。
+        self._panel: dict[str, pd.DataFrame] | None = None
+        self._panel_bars: int = _PANEL_BARS
         self._init_db()
 
     def _init_db(self) -> None:
@@ -348,14 +338,6 @@ class DataEngine:
             conn.commit()
         logger.info(f"数据库初始化完成：{self.db_path}")
 
-    def _get_last_date(self, symbol: str) -> str | None:
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT MAX(date) FROM stock_daily WHERE symbol = ?",
-                (symbol,),
-            ).fetchone()
-        return row[0] if row and row[0] else None
-
     def get_latest_date(self) -> str | None:
         """返回 stock_daily 中最新的一天，即当前数据的截止日期。"""
         with sqlite3.connect(self.db_path) as conn:
@@ -363,6 +345,11 @@ class DataEngine:
         return row[0] if row and row[0] else None
 
     def get_ohlcv(self, symbol: str) -> pd.DataFrame:
+        """读取单只股票的**全部**历史 K 线（含 id 列，按日期升序）。
+
+        想批量算策略请用 `market_panel()` —— 它一次加载、多策略共享；
+        这个方法是给「取单只票看细节」用的，逐只调用会退化成 5000+ 次查询。
+        """
         with sqlite3.connect(self.db_path) as conn:
             df = pd.read_sql(
                 "SELECT * FROM stock_daily WHERE symbol = ? ORDER BY date",
@@ -371,88 +358,75 @@ class DataEngine:
             )
         return df
 
-    @staticmethod
-    def _to_baostock_code(symbol: str) -> str:
-        """将纯数字代码转为 baostock 格式：6/9开头 -> sh，其余 -> sz。"""
-        prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
-        return f"{prefix}.{symbol}"
+    def market_panel(self, limit_bars: int = _PANEL_BARS) -> dict[str, pd.DataFrame]:
+        """一次性把全市场 K 线读进内存，返回 {代码: K 线}（进程内缓存）。
+
+        **为什么需要这个方法**：6 个 K 线策略原本各自「取全市场代码 → 逐只
+        `get_ohlcv`」，等于每轮把 5000+ 只票从 SQLite 捞 6 遍，光取数就 100 秒往上。
+        改成一次加载、多策略共享后，取数只付一次。
+
+        两个实现要点：
+
+        - **复用同一个 sqlite 连接**。逐只查询时每次 `connect()` 的固定开销
+          比查询本身还大（实测 3.4ms/只 vs 0.9ms/只）。
+        - **只取最近 `limit_bars` 根**（`ORDER BY date DESC LIMIT ?` 再反转）。
+          策略的回看窗口最长 120 根，全历史既慢又占内存。
+
+        只包含**全库最新交易日**当天有行情的代码（与 `get_local_symbols()` 同口径）：
+        停牌、退市或某轮同步漏掉的票最后一行早于大盘，不应参与当轮选股。
+
+        Args:
+            limit_bars: 每个代码保留的最近 K 线根数。
+
+        Returns:
+            {代码: DataFrame}，DataFrame 按日期升序、索引重置，
+            列为 `date/open/high/low/close/volume/turnover`。空库返回 {}。
+        """
+        if self._panel is not None and self._panel_bars == limit_bars:
+            return self._panel
+
+        started = time.perf_counter()
+        panel: dict[str, pd.DataFrame] = {}
+        conn = sqlite3.connect(self.db_path)
+        try:
+            symbols = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT DISTINCT symbol FROM stock_daily "
+                    "WHERE date = (SELECT MAX(date) FROM stock_daily) ORDER BY symbol"
+                )
+            ]
+            sql = (
+                f"SELECT {_PANEL_COLUMNS} FROM stock_daily "
+                "WHERE symbol = ? ORDER BY date DESC LIMIT ?"
+            )
+            for symbol in symbols:
+                df = pd.read_sql(sql, conn, params=(symbol, limit_bars))
+                if len(df):
+                    # 取到的是「最近 N 根」的倒序，反转回来才是按日期升序
+                    panel[symbol] = df.iloc[::-1].reset_index(drop=True)
+        finally:
+            conn.close()
+
+        self._panel = panel
+        self._panel_bars = limit_bars
+        logger.info(
+            f"已加载全市场 K 线快照：{len(panel)} 只 / "
+            f"{sum(len(v) for v in panel.values())} 行 / 每只最近 {limit_bars} 根"
+            f"（{time.perf_counter() - started:.1f}s）"
+        )
+        return panel
 
     # ── 数据同步 ──
 
     def sync_today_bulk(self) -> int:
-        """增量同步行情数据（后复权），写入 SQLite。
+        """增量同步行情数据并写入 SQLite，返回写入行数。
 
-        数据源：
-        - `prefer_akshare=True`：直接走 akshare，不探测 baostock；
-        - 否则先探测 baostock，不可用且 `enable_akshare_fallback=True` 时回落 akshare。
+        数据源只有一个：akshare（东方财富源）。方法名保留「bulk」是为了
+        与调用方（`main.py`）保持稳定，实际逻辑全在 `sync_via_akshare()` 里 ——
+        它负责把东财的复权基准换算到库中的后复权基准。
         """
-        from datetime import date, timedelta
-        from multiprocessing import Pool
-
-        # baostock 免费服务长期不稳定，CI 里"先探路再兜底"等于每轮都白等一次探测，
-        # 直接指定 akshare 就把这段时间省掉。
-        if self.prefer_akshare:
-            logger.info("PREFER_AKSHARE 已开启：跳过 baostock，直接用 akshare 更新增量数据")
-            return self.sync_via_akshare()
-
-        today_str = date.today().strftime("%Y-%m-%d")
-
-        tasks = []
-        with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute(
-                "SELECT symbol, MAX(date) FROM stock_daily GROUP BY symbol"
-            ).fetchall()
-
-        if not rows:
-            logger.warning("本地无股票数据，请先执行 --backfill")
-            return 0
-
-        for symbol, last_date in rows:
-            if last_date and last_date >= today_str:
-                continue
-            start = today_str
-            if last_date:
-                start = (date.fromisoformat(last_date) + timedelta(days=1)).strftime("%Y-%m-%d")
-            tasks.append((symbol, self._to_baostock_code(symbol), start, today_str))
-
-        if not tasks:
-            logger.info("所有股票已是最新，无需更新")
-            return 0
-
-        logger.info(f"需要更新 {len(tasks)} 只股票，启动多进程并行拉取...")
-
-        # 先探路：接口不可达就切到 akshare 兜底，不拉起进程池刷屏
-        reachable, reason = _probe_baostock()
-        if not reachable:
-            logger.warning(f"baostock 数据接口不可用（{reason}）。")
-            if not self.enable_akshare_fallback:
-                logger.warning(
-                    f"akshare 回退已关闭，跳过本次增量同步。"
-                    f"数据库数据截止 {self.get_latest_date()}，"
-                    f"本次选股将基于该日期及之前的数据。"
-                )
-                return 0
-            logger.warning("改用 akshare 拉取增量数据...")
-            return self.sync_via_akshare()
-
-        n_workers = min(8, len(tasks))
-        chunks = [tasks[i::n_workers] for i in range(n_workers)]
-
-        with Pool(n_workers) as pool:
-            batch_results = pool.map(_bs_fetch_batch, chunks)
-
-        all_rows = []
-        for batch in batch_results:
-            all_rows.extend(batch)
-
-        if not all_rows:
-            logger.info("无新数据（可能非交易日）")
-            return 0
-
-        df = pd.DataFrame(all_rows, columns=["symbol", "date", "open", "high", "low", "close", "volume", "turnover"])
-        count = self._upsert_daily(df)
-
-        logger.info(f"sync_today_bulk: 写入 {count} 条数据")
+        return self.sync_via_akshare()
 
     # ── akshare 增量同步 ──
 
@@ -481,13 +455,13 @@ class DataEngine:
     def sync_via_akshare(self, today: str | None = None) -> int:
         """通过 akshare（东财）拉增量行情，换算到库中的后复权基准后写入。
 
-        这是 baostock 之外的数据更新通道：`prefer_akshare=True` 时直接用它，
-        否则作为 baostock 探测不通时的回退。两种情形走的都是同一条换算逻辑。
+        这是**唯一**的行情更新通道。注意库里已有的历史序列是早期用 baostock
+        拉的后复权数据，而东财的复权基准与它不同，所以新数据不能直接写入。
 
         为什么不把 akshare 的行情直接写进库：**不同数据源的复权基准不同**。
         实测同一只票同一日（sh600000 / 2026-10-09）：
 
-        - baostock 后复权收盘 = 127.52
+        - baostock 后复权收盘 = 127.52（库里历史序列的基准）
         - 东财后复权收盘       = 102.23
 
         而且两者的日收益率也不一致。直接拼接会让价格序列出现断层，
@@ -636,208 +610,27 @@ class DataEngine:
                 index=False, method="multi", chunksize=500,
             )
             conn.commit()
+        # 库里数据变了，之前构建的快照作废，下次 market_panel() 重新加载
+        self._panel = None
         return count
-
-    def backfill(self, symbols: list[str]) -> None:
-        """通过 baostock 批量回填历史日 K 线数据（后复权）。
-
-        容错机制：
-        - 单只股票失败自动重试 3 次，间隔递增（2s/4s/8s）
-        - 每 200 只股票自动重连 baostock（防止长连接超时）
-        - 已入库的自动 skip，中断后可重跑续传
-        """
-        import time
-        from datetime import date, timedelta
-
-        import baostock as bs
-
-        today_str = date.today().strftime("%Y-%m-%d")
-        max_retries = 3
-        reconnect_interval = 200  # 每处理 N 只股票重连一次
-
-        def _login():
-            lg = bs.login()
-            if lg.error_code != "0":
-                logger.error(f"baostock 登录失败: {lg.error_msg}")
-                return False
-            return True
-
-        if not _login():
-            return
-
-        success = 0
-        skipped = 0
-        failed = 0
-        since_reconnect = 0
-
-        try:
-            for i, symbol in enumerate(symbols):
-                last_date = self._get_last_date(symbol)
-                if last_date and last_date >= today_str:
-                    skipped += 1
-                    if (i + 1) % 500 == 0:
-                        logger.info(
-                            f"已处理 {i + 1}/{len(symbols)}，"
-                            f"成功 {success} 跳过 {skipped} 失败 {failed}"
-                        )
-                    continue
-
-                # 定期重连，防止长连接超时
-                since_reconnect += 1
-                if since_reconnect >= reconnect_interval:
-                    bs.logout()
-                    time.sleep(1)
-                    if not _login():
-                        logger.error("重连失败，终止回填")
-                        return
-                    since_reconnect = 0
-
-                start = last_date or self.start_date
-                if last_date:
-                    start = (date.fromisoformat(last_date) + timedelta(days=1)).strftime("%Y-%m-%d")
-
-                bs_code = self._to_baostock_code(symbol)
-
-                # 带重试的查询
-                rows = []
-                query_ok = False
-                for attempt in range(max_retries):
-                    try:
-                        rs = bs.query_history_k_data_plus(
-                            bs_code,
-                            "date,open,high,low,close,volume,amount",
-                            start_date=start,
-                            end_date=today_str,
-                            frequency="d",
-                            adjustflag="1",  # 后复权
-                        )
-
-                        if rs.error_code != "0":
-                            raise RuntimeError(rs.error_msg)
-
-                        rows = []
-                        while rs.next():
-                            try:
-                                row_data = rs.get_row_data()
-                                # 检查是否有乱码数据（非正常数字/日期格式）
-                                if any(not isinstance(v, str) or (v and any(ord(c) > 127 for c in v)) for v in row_data):
-                                    # 尝试清理乱码字符
-                                    cleaned = []
-                                    for v in row_data:
-                                        if isinstance(v, str):
-                                            # 过滤掉非 ASCII 字符
-                                            cleaned.append(''.join(c for c in v if ord(c) <= 127))
-                                        else:
-                                            cleaned.append(v)
-                                    row_data = tuple(cleaned)
-                                rows.append(row_data)
-                            except UnicodeDecodeError:
-                                # 单行解码失败，跳过该行
-                                logger.warning(f"[{symbol}] 单行数据解码失败，跳过")
-                                continue
-                        query_ok = True
-                        break
-
-                    except UnicodeDecodeError as exc:
-                        # 整体解码失败，触发重试
-                        if attempt < max_retries - 1:
-                            wait = 2 ** (attempt + 1)
-                            logger.warning(
-                                f"[{symbol}] 第{attempt + 1}次失败：{exc}，{wait}s 后重试"
-                            )
-                            time.sleep(wait)
-                            # 重连 baostock
-                            bs.logout()
-                            time.sleep(1)
-                            _login()
-                        else:
-                            logger.warning(f"[{symbol}] {max_retries}次重试均失败，跳过")
-                    except Exception as exc:
-                        if attempt < max_retries - 1:
-                            wait = 2 ** (attempt + 1)
-                            logger.warning(
-                                f"[{symbol}] 第{attempt + 1}次失败：{exc}，{wait}s 后重试"
-                            )
-                            time.sleep(wait)
-                            # 重连 baostock
-                            bs.logout()
-                            time.sleep(1)
-                            _login()
-                        else:
-                            logger.warning(f"[{symbol}] {max_retries}次重试均失败，跳过")
-
-                if not query_ok:
-                    failed += 1
-                    continue
-
-                if not rows:
-                    skipped += 1
-                    continue
-
-                df = pd.DataFrame(rows, columns=rs.fields)
-                for col in ["open", "high", "low", "close", "volume", "amount"]:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                df = df.dropna(subset=["close"])
-                df = df[df["volume"] > 0]
-
-                if df.empty:
-                    skipped += 1
-                    continue
-
-                df["symbol"] = symbol
-                df = df.rename(columns={"amount": "turnover"})
-                df = df[["symbol", "date", "open", "high", "low", "close", "volume", "turnover"]]
-
-                try:
-                    with sqlite3.connect(self.db_path) as conn:
-                        df.to_sql(
-                            "stock_daily", conn, if_exists="append",
-                            index=False, method="multi", chunksize=500,
-                        )
-                except sqlite3.IntegrityError:
-                    pass
-
-                success += 1
-
-                if (i + 1) % 500 == 0:
-                    logger.info(
-                        f"已处理 {i + 1}/{len(symbols)}，"
-                        f"成功 {success} 跳过 {skipped} 失败 {failed}"
-                    )
-
-        finally:
-            bs.logout()
-
-        logger.info(f"回填完成 — 成功: {success} | 跳过: {skipped} | 失败: {failed}")
 
     # ── 股票列表 ──
 
     def get_all_symbols(self) -> list[str]:
-        """通过 baostock 获取全市场 A 股代码列表。"""
-        import baostock as bs
+        """获取全市场 A 股代码列表（akshare）。
 
-        lg = bs.login()
-        if lg.error_code != "0":
-            logger.error(f"baostock 登录失败: {lg.error_msg}")
-            return []
+        已剔除北交所（4/8 开头）：东财 F10 对北交所没有数据，本库的行情与
+        行业板块也都只覆盖沪深两市，纳进来只会多出无谓的失败请求。
 
-        try:
-            rs = bs.query_stock_basic(code_name="", code="")
-            symbols = []
-            while rs.next():
-                row = rs.get_row_data()
-                code = row[0]           # "sh.600000" or "sz.000001"
-                status = row[4]         # "1" = 上市
-                stock_type = row[5]     # "1" = 股票
-                if status == "1" and stock_type == "1":
-                    symbols.append(code.split(".")[1])  # 提取纯数字代码
-            logger.info(f"获取股票列表完成，共 {len(symbols)} 只")
-            return symbols
-        except Exception as e:
-            logger.error(f"获取股票列表失败: {e}")
+        Returns:
+            纯数字代码列表；取不到时返回 []（由调用方决定降级策略）。
+        """
+        pairs = _ak_fetch_symbol_names()
+        if not pairs:
             return []
-        finally:
-            bs.logout()
+        symbols = [s for s, _ in pairs if not s.startswith(("4", "8"))]
+        logger.info(f"获取股票列表完成，共 {len(symbols)} 只")
+        return symbols
 
     def get_local_symbols(self, latest_only: bool = True) -> list[str]:
         """返回本地有行情数据的股票代码。
@@ -867,48 +660,19 @@ class DataEngine:
     def refresh_stock_names(self) -> int:
         """批量刷新全市场股票名称到本地 stock_name 表，返回写入条数。
 
-        为什么不逐只查询：baostock 单次会话内逐只 query_stock_basic 在请求量大时
-        会开始返回空结果（CI 环境尤其明显），导致大量股票只能显示代码。
-        这里改成一次性拉全市场（单次请求），并且落库以便跟随数据库缓存持久化 ——
+        数据源：akshare `stock_info_a_code_name()`，**一次请求拿全市场**。
+        为什么不用逐只查询：请求量上来后逐只接口会开始返回空结果
+        （CI 环境尤其明显），导致大量股票只能显示代码。
+        名称落库还有一层好处：它能跟随数据库缓存持久化 ——
         即使某次刷新失败，也能沿用上一次的名称，不影响推送显示。
 
-        仅采集 type == "1"（股票），避免把指数写进来：
-        `sh.000001` 是上证综合指数，与 `sz.000001` 平安银行数字部分相同，
-        不过滤会导致同号串名。
+        只会写入沪深两市（`_ak_fetch_symbol_names` 已剥掉前缀），
+        指数（如上证综指 `000001`）不会进来，避免与平安银行同号串名。
 
         Returns:
             成功写入的名称条数；失败或未取到数据时返回 0（沿用已有数据）。
         """
-        import baostock as bs
-
-        try:
-            lg = bs.login()
-        except Exception as exc:  # 网络异常
-            logger.warning(f"baostock 登录异常，沿用已有股票名称：{exc}")
-            return 0
-
-        if lg.error_code != "0":
-            logger.warning(f"baostock 登录失败，沿用已有股票名称：{lg.error_msg}")
-            return 0
-
-        rows: list[tuple[str, str]] = []
-        try:
-            rs = bs.query_stock_basic(code_name="", code="")
-            while rs.next():
-                r = rs.get_row_data()
-                # 字段顺序：code, code_name, ipoDate, outDate, type, status
-                if len(r) < 6 or r[4] != "1":  # type != 1 的是指数等，跳过
-                    continue
-                symbol = r[0].split(".")[-1]
-                name = (r[1] or "").strip()
-                if symbol and name:
-                    rows.append((symbol, name))
-        except Exception as exc:
-            logger.warning(f"获取股票名称异常，沿用已有股票名称：{exc}")
-            return 0
-        finally:
-            bs.logout()
-
+        rows = _ak_fetch_symbol_names()
         if not rows:
             logger.warning("未获取到股票名称，沿用已有数据")
             return 0
@@ -934,8 +698,8 @@ class DataEngine:
         """stock_name 表对 stock_daily 中股票的覆盖率（0~1）。
 
         用于决定是否需要刷新名称：名称表随数据库缓存持久化，
-        正常跑几轮后就是全的。覆盖率已经很高还去刷新，只会白白触发
-        baostock 登录（不可用时还会往 stdout 吐噪音）。
+        正常跑几轮后就是全的。覆盖率已经很高还去刷新，只是白打一次网络请求并
+        阻塞启动流程 —— 名称表够用就直接跳过。
         """
         with sqlite3.connect(self.db_path) as conn:
             total = conn.execute(

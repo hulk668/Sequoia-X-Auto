@@ -403,7 +403,7 @@ def test_qq_request_returns_none_when_all_bases_fail(monkeypatch) -> None:
 
 
 def test_load_symbols_retries_and_takes_longest(monkeypatch) -> None:
-    """baostock 清单会中途截断，应重试取最长的那次。"""
+    """在线股票清单偶发被截断，应重试取最长的那次。"""
     from sequoia_x.data import backfill as bf_mod
 
     seq = [[f"60000{i}" for i in range(230)],
@@ -444,7 +444,7 @@ def test_load_symbols_returns_empty_when_all_fail() -> None:
 
     class _Eng:
         def get_all_symbols(self):
-            raise OSError("baostock 不通")
+            raise OSError("在线接口不通")
 
         def get_stock_names(self):
             return {}
@@ -566,11 +566,11 @@ def test_fetch_kline_respects_explicit_source(monkeypatch) -> None:
 # ── 与策略/推送的口径一致性 ──
 
 
-def test_backfilled_rows_have_same_columns_as_baostock_rows() -> None:
-    """补数写入的行必须与 baostock 通道的列口径一致，否则策略会读错列。"""
+def test_backfilled_rows_have_same_columns_as_incremental_rows() -> None:
+    """补数写入的行必须与日常增量通道的列口径一致，否则策略会读错列。"""
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
         engine, _ = _engine_in(tmp_dir)
-        _seed(engine, "600000", ["2024-01-02"])   # 模拟 baostock 通道写入
+        _seed(engine, "600000", ["2024-01-02"])   # 模拟增量通道写入
 
         df = engine.get_ohlcv("600000")
         assert list(df.columns) == [

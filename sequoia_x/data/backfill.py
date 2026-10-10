@@ -409,11 +409,9 @@ def load_symbols(engine: DataEngine, *, min_expected: int = 4000,
                  attempts: int = 3) -> list[str]:
     """取全市场 A 股代码清单，带完整性与兜底校验。
 
-    **为什么不能直接用 `engine.get_all_symbols()`**：baostock 的
-    `query_stock_basic` 是流式返回，实测会在中途超时截断 —— 曾拿到「共 230 只」
-    这种明显不完整的结果，而调用方无从分辨，补数会静默变成「无事可做」。
-
-    这里做三层保护：
+    清单只有一个来源（akshare 的 `stock_info_a_code_name()`），但**一次网络请求
+    拿到的东西不能无条件相信** —— 接口偶发返回被截断的结果时，调用方无从分辨，
+    补数会静默变成「无事可做」。这里做三层保护：
 
     1. 重试 `attempts` 次，取最长的那次结果（截断是概率性的，多试一次多数能拿全）；
     2. 长度达到 `min_expected` 才认可；
@@ -424,7 +422,7 @@ def load_symbols(engine: DataEngine, *, min_expected: int = 4000,
     Args:
         engine: 数据引擎。
         min_expected: 认可一次结果所需的最少股票数，低于此值视为截断。
-        attempts: baostock 尝试次数。
+        attempts: 重试次数。
 
     Returns:
         股票代码列表（顺序不定）；三层都拿不到时返回空列表。
@@ -444,7 +442,7 @@ def load_symbols(engine: DataEngine, *, min_expected: int = 4000,
     local = list(engine.get_stock_names())
     if len(local) > len(best):
         logger.warning(
-            f"baostock 清单疑似截断（最长只有 {len(best)} 只，预期 ≥{min_expected}），"
+            f"在线清单疑似不完整（最长只有 {len(best)} 只，预期 ≥{min_expected}），"
             f"改用本地 stock_name 表（{len(local)} 条，含已退市代码）"
         )
         return local
@@ -608,53 +606,3 @@ class MarketBackfiller:
                     return [], ""
             time.sleep(2 ** (attempt + 1))
         return [], ""
-
-
-def _default_bars() -> int:
-    """默认保留的 K 线根数。
-
-    全部策略里最长的回看是 `UptrendLimitDownStrategy` 的 60 日均线（需要 61 根），
-    留 400 根有 6 倍余量，同时把种子文件控制在 GitHub 单文件 100MB 以内。
-    """
-    return 400
-
-
-def main() -> None:
-    """命令行入口：`python -m sequoia_x.data.backfill [--bars 400]`。"""
-    import argparse
-
-    from sequoia_x.core.config import get_settings
-
-    parser = argparse.ArgumentParser(description="Sequoia-X V2 全市场补数")
-    parser.add_argument("--start", help="起始日期 YYYY-MM-DD（默认取配置 start_date）")
-    parser.add_argument("--end", help="截止日期 YYYY-MM-DD（默认今天）")
-    parser.add_argument(
-        "--bars", type=int, default=_default_bars(),
-        help=f"每只票保留最近 N 根 K 线（默认 {_default_bars()}，0 表示不截断）",
-    )
-    parser.add_argument(
-        "--source", choices=["auto", "em", "qq"], default="auto",
-        help="数据源：auto=东财优先腾讯兜底（默认）",
-    )
-    parser.add_argument("--limit", type=int, default=0, help="只补前 N 只（试跑用）")
-    args = parser.parse_args()
-
-    settings = get_settings()
-    engine = DataEngine(settings)
-    symbols = engine.get_all_symbols()
-    if args.limit:
-        symbols = symbols[: args.limit]
-        logger.info(f"--limit 生效，只补前 {len(symbols)} 只（试跑）")
-
-    backfiller = MarketBackfiller(
-        engine, settings,
-        start_date=args.start, end_date=args.end,
-        bars=args.bars, source=args.source,
-    )
-    stats = backfiller.run(symbols)
-    logger.info(f"补数结果：{stats}")
-    logger.info(f"数据库数据截止日期：{engine.get_latest_date()}")
-
-
-if __name__ == "__main__":
-    main()

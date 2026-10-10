@@ -2,6 +2,8 @@
 
 from abc import ABC, abstractmethod
 
+import pandas as pd
+
 from sequoia_x.core.config import Settings
 from sequoia_x.data.engine import DataEngine
 
@@ -71,6 +73,9 @@ class BaseStrategy(ABC):
 
     webhook_key: str = "default"
 
+    #: 策略计算所需的最少 K 线根数。子类按自己最长的一个窗口覆盖。
+    _MIN_BARS: int = 1
+
     def __init__(self, engine: DataEngine, settings: Settings) -> None:
         """
         初始化策略。
@@ -81,6 +86,19 @@ class BaseStrategy(ABC):
         """
         self.engine = engine
         self.settings = settings
+
+    def bars_by_symbol(self) -> dict[str, pd.DataFrame]:
+        """取全市场 K 线快照，返回 {代码: K 线}。
+
+        **所有策略都应该走这个方法取数，不要自己逐只查库。**
+        引擎内部只加载一次（`DataEngine.market_panel()`），7 个策略共享同一份 ——
+        逐只查库时每个策略都要把 5000+ 只票捞一遍，实测光取数就 100 秒往上。
+
+        Returns:
+            {代码: DataFrame}，按日期升序、索引已重置；
+            只含全库最新交易日当天有行情的代码。
+        """
+        return self.engine.market_panel()
 
     @abstractmethod
     def run(self) -> list[str]:
