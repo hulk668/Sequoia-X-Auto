@@ -98,8 +98,8 @@
 ### 第 2 步：下载代码、装依赖
 
 ```bash
-git clone https://github.com/hulk668/Sequoia-X-Auto.git
-cd Sequoia-X-Auto
+git clone https://github.com/hulk668/SequoiaX-AutoPlus.git
+cd SequoiaX-AutoPlus
 
 # 建一个独立的运行环境（推荐，避免污染电脑里的其他 Python）
 python -m venv .venv
@@ -163,7 +163,7 @@ mail_to = "收件邮箱@example.com"  # 发给谁，多个用逗号隔开
 
 **办法 A：下载现成的（推荐，几秒钟）**
 
-打开 <https://github.com/hulk668/Sequoia-X-Auto/releases>，找到最新那个版本的
+打开 <https://github.com/hulk668/SequoiaX-AutoPlus/releases>，找到最新那个版本的
 `sequoia_v2.db.gz`，下载后解压，把得到的 `sequoia_v2.db` 放到项目的 `data` 文件夹里。
 
 > 文件名必须是 `sequoia_v2.db`。
@@ -214,7 +214,7 @@ python scripts/test_mail.py             # 完整测一遍：连上 → 登录 �
 
 ### 第 1 步：把代码复制到你自己的 GitHub 账号下
 
-打开 <https://github.com/hulk668/Sequoia-X-Auto>，
+打开 <https://github.com/hulk668/SequoiaX-AutoPlus>，
 点右上角的 **Fork** 按钮，复制一份到你自己账号下。
 
 > 因为要天天跑、还要存数据库，用自己的仓库最方便。
