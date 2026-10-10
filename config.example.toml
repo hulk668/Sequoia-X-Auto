@@ -34,11 +34,20 @@ notify_channel = "auto"
 # 而且能排版成带样式的 HTML。
 #
 # ⚠️ smtp_password 在多数邮箱要填「客户端授权码」，不是登录密码：
-#     QQ 邮箱    smtp.qq.com        465(SSL)  设置→账户→开启SMTP→生成授权码
-#     163 邮箱   smtp.163.com       465(SSL)  设置→POP3/SMTP/IMAP→开启→授权码
-#     Gmail     smtp.gmail.com     587(STARTTLS)  需「应用专用密码」
-#     钉钉企业邮箱 smtp.em.dingtalk.com  465(SSL)  需管理员开通第三方客户端
-#     （钉钉个人邮箱 @dingtalk.com 可能不允许第三方客户端发信，届时改用其他邮箱即可）
+#     QQ 邮箱    smtp.qq.com      465(SSL)  设置→账号与安全→安全设置→开启SMTP→生成授权码
+#     163 邮箱   smtp.163.com     465(SSL)  设置→POP3/SMTP/IMAP→开启→新增授权密码
+#     Gmail     smtp.gmail.com   587(STARTTLS)  需「应用专用密码」
+#     钉钉企业邮箱 smtp.em.dingtalk.com  465(SSL)
+#        · 它和阿里云企业邮箱是同一台服务器（smtp.em.dingtalk.com = smtp.qiye.aliyun.com）
+#        · ⚠️ 两个前置条件缺一不可，否则一定认证失败：
+#          ① 管理员：钉钉管理后台 → 通讯录 → 邮箱管理 → 安全策略 → 第三方客户端管理
+#             （钉钉官方原文：该功能**默认禁用**，管理员不开就没有生成授权码的入口）
+#          ② 用户：邮箱网页端 → 设置 → 账户与安全 → 账户安全 →
+#             三方客户端登录安全管理 → 生成新密码（16 位，只显示一次，需填设备名）
+#        · 「@dingtalk.com」是钉钉免费赠送的**个人邮箱**，官方手册（《钉钉企业邮箱
+#          使用手册》）只覆盖企业邮箱，且它只能用钉钉账号登录、没有独立邮箱密码。
+#          能否用就看上面第 ② 步找不找得到那一项 —— 找不到就是这个账号没开此能力，
+#          换 QQ / 163 发件即可（配置全参数化，不用改代码）。
 smtp_host = "smtp.qq.com"
 smtp_port = 465
 smtp_user = "you@qq.com"

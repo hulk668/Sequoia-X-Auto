@@ -138,6 +138,12 @@ python main.py
 | `MAIL_FROM_NAME` | 可选 | 发件人显示名，默认「Sequoia-X 选股」 |
 | `NOTIFY_CHANNEL` | 可选 | `auto`（默认）/ `email` / `pushplus` / `both` / `none` |
 
+> **钉钉 / 阿里云邮箱特别注意**：底层是阿里云邮箱（`smtp.em.dingtalk.com` 与
+> `smtp.qiye.aliyun.com` 同一台服务器）。三方客户端默认**全局禁用**，必须
+> ① 管理员在「钉钉管理后台 → 通讯录 → 邮箱管理 → 安全策略 → 第三方客户端管理」开启；
+> ② 你自己在邮箱网页端「设置 → 账户与安全 → 账户安全 → 三方客户端登录安全管理」
+> 生成 16 位新密码。两步都做完才能认证成功。详见 `RUNNING.md` 第 6 节 FAQ。
+
 **PushPlus（可选，仅作备用）**：
 
 | Secret 名称 | 必填 | 说明 |
