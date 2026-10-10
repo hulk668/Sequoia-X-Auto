@@ -130,8 +130,12 @@ jobs:
           TAG="${{ steps.tag.outputs.tag }}"
           ASSET="data/seed/sequoia_v2.db.gz"
 
-          # 单引号 heredoc：禁止 shell 展开，里面的 ${{ }} 由 Actions 在脚本执行前
-          # 就替换成字面量了，所以这里必须全部用 ${{ }} 表达式、别混用 ${GITHUB_xxx}。
+          # 单引号 heredoc（<<'EOF'）禁止 shell 展开；正文里的 Actions 表达式
+          # 由 Actions 在脚本执行前就替换成字面量了，所以别混用 shell 的 ${VAR} 写法。
+          #
+          # ⚠️ 注释里也绝不能写 Actions 表达式的定界符（美元符号 + 双大括号）：
+          #    GitHub 会扫描整段 run 文本、连注释一起解析，写到一对空定界符会被判定为
+          #    「An expression was expected」，整个 workflow 文件直接非法、无法运行。
           NOTES=$(cat <<'EOF'
           Sequoia-X 数据库冷启动种子。
 
