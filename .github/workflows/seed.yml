@@ -52,6 +52,9 @@ jobs:
       # 本工作流不推送，但 Settings 里 pushplus_token 是必填字段，
       # 缺了会在 get_settings() 直接抛 ValidationError。给个占位值即可。
       PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN || 'seed-workflow-no-push' }}
+      # 全市场股票池下限。低于它说明池子残缺（例如只剩沪市主板 1332 只），
+      # 打包前必须先补齐 —— 否则会把残缺的库当成"可用种子"发出去。
+      MIN_SYMBOLS: '4000'
 
     steps:
       - name: 检出代码
@@ -82,23 +85,47 @@ jobs:
       - name: 确认数据库可用（必要时补数）
         run: |
           set -eo pipefail
+          BARS="${{ inputs.bars }}"
+
           if [ -f data/sequoia_v2.db ]; then
             ROWS=$(python -c "import sqlite3;print(sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(*) FROM stock_daily').fetchone()[0])")
-            echo "从缓存取到数据库：$ROWS 行"
-            if [ "$ROWS" -gt 0 ]; then
+            SYMBOLS=$(python -c "import sqlite3;print(sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(DISTINCT symbol) FROM stock_daily').fetchone()[0])")
+            echo "缓存里的数据库：$ROWS 行 / $SYMBOLS 只股票（全市场约 5200）"
+
+            # 只看「行数够不够」是不够的 —— 股票池可能退化成只剩沪市主板。
+            # daily 的增量同步只更新库里**已有的**股票，永远不会自己把池子扩回来，
+            # 所以必须按「股票数」判断：不足就补，否则会打包出一个残缺的种子。
+            # （曾经就是这样把 1332 只的库发上了 Release。）
+            if [ "$ROWS" -gt 0 ] && [ "$SYMBOLS" -ge "$MIN_SYMBOLS" ]; then
+              echo "✓ 股票池已覆盖 $SYMBOLS 只（阈值 $MIN_SYMBOLS），无需补数"
               exit 0
             fi
-            echo "缓存里的数据库是空的，按未命中处理"
-            rm -f data/sequoia_v2.db
+
+            if [ "$SYMBOLS" -gt 0 ]; then
+              echo "::warning::股票池只有 $SYMBOLS 只，低于阈值 $MIN_SYMBOLS —— 补齐缺失的股票"
+            else
+              echo "缓存里的数据库是空的，从零补齐"
+            fi
+          else
+            if [ "${{ inputs.backfill_if_empty }}" != "true" ]; then
+              echo "::error::缓存未命中，且本次未勾选自动补数。请勾选后重跑。"
+              exit 1
+            fi
+            echo "缓存未命中，从零补齐全市场"
           fi
 
-          if [ "${{ inputs.backfill_if_empty }}" != "true" ]; then
-            echo "::error::缓存未命中的，且本次未勾选自动补数。请先跑一次 daily 工作流让缓存建立起来。"
+          # backfill 只补「库里一行都没有」的股票，已有的不动 —— 天然幂等：
+          # 无论当前池子是 0 只还是 1332 只，跑完都是全市场。
+          python main.py --backfill --bars "$BARS"
+
+          # 补完必须复核，避免又把一个残缺的库打包发上 Release
+          SYMBOLS=$(python -c "import sqlite3;print(sqlite3.connect('data/sequoia_v2.db').execute('SELECT COUNT(DISTINCT symbol) FROM stock_daily').fetchone()[0])")
+          if [ "$SYMBOLS" -lt "$MIN_SYMBOLS" ]; then
+            echo "::error::补数后股票数仍只有 $SYMBOLS 只（阈值 $MIN_SYMBOLS）。"
+            echo "::error::多半是 runner 连不上东财/腾讯。请改用「本机打包 + 网页上传」：见 data/seed/README.md。"
             exit 1
           fi
-
-          echo "缓存未命中，开始全市场补数（东财 → 腾讯兜底）……"
-          python main.py --backfill --bars "${{ inputs.bars }}"
+          echo "✓ 补数完成，股票池 $SYMBOLS 只"
 
       - name: 打包种子
         id: pack
